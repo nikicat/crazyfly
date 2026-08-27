@@ -214,10 +214,10 @@ def test_classify_names_the_lifted_edge(d_roll, d_pitch, axis, lifted):
     assert got_opposite != got_lifted
 
 
-def test_classify_rejects_a_corner_lift():
+def test_classify_rejects_a_between_arms_lift():
     axis, reason, _ = orient.classify(20.0, 20.0)
     assert axis is None
-    assert "corner" in reason
+    assert "two arms" in reason
 
 
 def test_classify_rejects_too_little_tilt():

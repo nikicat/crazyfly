@@ -77,7 +77,7 @@ uv run info.py
 | `trimcheck.py` | Diagnose drift: gyro, sensor offset, or mechanical. |
 | `hoptest.py` | Bounded hops for trimming indoors; lands on a timer. |
 | `flightcheck.py` | Is it actually airborne? Run before trusting any trim result. |
-| `motorcheck.py` | Find the pitch sign on the ground, by which motors spin up. |
+| `motorcheck.py` | Find the pitch sign on the ground, by which motor slows down. |
 | `signals.py` | Recovering a delayed response from the signal that caused it. |
 | `orient.py` | Work out which physical edge is the front, by tilting it. |
 | `linkcheck.py` | Low-level radio diagnostic. **Start here when something is wrong.** Needs no working firmware. |
@@ -155,12 +155,19 @@ offset alone predicts a drift to the right, which is what it does.
 
 ### Which way is front
 
-An X-frame looks identical from every side, so the front is not a visual fact
-— it is set by how the IMU is mounted. `orient.py` finds it by experiment: lie
-the drone flat for a baseline, lift one edge and hold, and the axis that moves
-identifies which side you lifted. Mark that edge with tape.
+The Crazyflie 1.0 flies in **"+" configuration**: one motor at the front, one
+at the back, one each side. So the front is a single *arm*, not a gap between
+two — and cflib matches, since `send_setpoint`'s `_x_mode` (which would rotate
+the setpoints 45°) defaults to off. Pitch is the front motor against the back
+one; roll is the other pair entirely.
 
-Fly with the marked edge pointing away from you, so the drone's left and right
+The frame looks the same from every side, so which arm is the front is set by
+the IMU mounting rather than anything visible. `orient.py` finds it: lie the
+drone flat for a baseline, lift **one arm** by its motor and hold. In plus
+configuration that is a pure single-axis tilt, so the axis that moves says
+which arm you lifted. Mark it with tape.
+
+Fly with the marked arm pointing away from you, so the drone's left and right
 match your own. Facing it toward you mirrors every correction, which is the
 usual reason a trimmed drone still feels like it fights you.
 
