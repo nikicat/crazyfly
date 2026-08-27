@@ -1,0 +1,29 @@
+[project]
+name = "crazyfly"
+version = "0.1.0"
+description = "Control a Crazyflie 1.0 over an old Crazyradio PA dongle"
+readme = "README.md"
+# cflib's numpy/scipy stack has no reliable 3.14 aarch64 wheels yet.
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "cflib==0.1.33",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.16",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "UP", "B", "SIM", "RET", "C4", "ARG", "PIE"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test doubles mirror cflib's signatures, so they carry arguments they ignore.
+"tests/*" = ["ARG002"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
