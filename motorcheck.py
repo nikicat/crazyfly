@@ -38,7 +38,7 @@ PROBE_PITCH = 20.0       # degrees; deliberately unreachable, to saturate output
 PHASE_SECONDS = 0.8
 CYCLES = 3
 HOLD_SECONDS = 4.0       # steady lean, long enough to watch the props
-DEFAULT_THRUST = 20000   # spins the motors, nowhere near enough to lift
+DEFAULT_THRUST = 15000   # low enough that the losing motor reaches zero
 MIN_CORRELATION = 0.5
 
 MOTORS = ("motor.m1", "motor.m2", "motor.m3", "motor.m4")
@@ -153,43 +153,65 @@ def main() -> None:
                   "Raise --pitch or --thrust and retry.")
             return
 
-        slows = min(pitch_pair, key=lambda m: report[m]["gain"])
-        print(f"\nWith a positive pitch commanded, {slows} slows down.")
+        low_on_plus = min(pitch_pair, key=lambda m: report[m]["gain"])
+        low_on_minus = max(pitch_pair, key=lambda m: report[m]["gain"])
 
-        # Step 2: hold it steady so the slow propeller can actually be seen.
-        print(f"\nStep 2: holding {args.pitch:+.0f} deg for {HOLD_SECONDS:.0f}s.")
-        print("Watch for the ONE propeller that is clearly slowest, or stopped.")
-        input("Press Enter when ready: ")
-        drive(scf, args.thrust, [(+args.pitch, HOLD_SECONDS)])
+        # Step 2: stop each end of the axis in turn. Which propeller STOPS is
+        # something you can actually see; which is merely slower is not. The
+        # positions are relative to where you are standing, so nothing depends
+        # on a marking being right -- and asking twice cross-checks the answer.
+        print("\nStep 2: identifying the two pitch arms.")
+        print("Leave the drone exactly where it is and do not turn it between\n"
+              "the two runs. Answer relative to YOU.\n")
 
-        print("\nWhich arm was that? Positions are relative to the front you\n"
-              "marked with orient.py, with the front pointing away from you.\n")
-        answer = input("  [f] front  [b] back  [l] left  [r] right: ").strip().lower()
+        seen = {}
+        for label, pitch, motor in ((f"{args.pitch:+.0f}", +args.pitch, low_on_plus),
+                                    (f"{-args.pitch:+.0f}", -args.pitch, low_on_minus)):
+            print(f"  Holding {label} deg for {HOLD_SECONDS:.0f}s -- watch for "
+                  f"the propeller that STOPS.")
+            input("  Press Enter when ready: ")
+            _c, held = drive(scf, args.thrust, [(pitch, HOLD_SECONDS)])
+            floor = min((v for _t, v in held[motor]), default=None)
+            if floor is not None:
+                if floor > 0:
+                    print(f"  ({motor} bottomed out at {floor:.0f}, so it slowed "
+                          f"but never stopped.\n"
+                          f"   If you could not tell, Ctrl-C and retry with "
+                          f"--thrust {max(8000, args.thrust - 4000)}.)")
+                else:
+                    print(f"  ({motor} reached zero, so that propeller stopped.)")
+            answer = input("  Which arm stopped?  [n] nearest you  [f] furthest  "
+                           "[l] left  [r] right: ").strip().lower()[:1]
+            if answer not in ("n", "f", "l", "r"):
+                print("\n  Not a recognised answer. Re-run and watch again.")
+                return
+            seen[motor] = answer
+            print()
 
-        if answer.startswith(("l", "r")):
-            print("\nThat is the roll axis, so the edge you marked as the front\n"
-                  "is 90 degrees out. Re-run orient.py, re-mark, and try again.")
+        names = {"n": "NEAREST you", "f": "FURTHEST from you",
+                 "l": "on your LEFT", "r": "on your RIGHT"}
+        for motor, where in seen.items():
+            print(f"  {motor} is the arm {names[where]}")
+
+        opposites = {"n": "f", "f": "n", "l": "r", "r": "l"}
+        first, second = seen[low_on_plus], seen[low_on_minus]
+        if opposites[first] != second:
+            print("\nThose two arms are not opposite each other, so one of the\n"
+                  "readings was misread -- the pitch pair must sit across the\n"
+                  "frame from one another. Run it again and watch carefully.")
             return
 
-        if answer.startswith("f"):
-            print("\nThe FRONT motor slows, so the nose drops: a positive pitch\n"
-                  "command flies the drone FORWARD.")
-            print("A backward drift is therefore corrected by INCREASING pitch "
-                  "trim.")
-            mapping = '"b": ("pitch", +1)'
-        elif answer.startswith("b"):
-            print("\nThe BACK motor slows, so the tail drops and the nose rises:\n"
-                  "a positive pitch command flies the drone BACKWARD.")
-            print("A backward drift is therefore corrected by DECREASING pitch "
-                  "trim.")
-            mapping = '"b": ("pitch", -1)'
-        else:
-            print("\nNo answer recorded. Re-run and watch for the slow prop.")
-            return
+        print("\nConsistent: the two arms are opposite, as the pitch axis must be.")
+        print(f"\nA positive pitch command drops the arm {names[first]},\n"
+              f"so the drone accelerates that way.")
+        print(f"A negative pitch command drops the arm {names[second]}.")
 
-        print(f"\n  hoptest.py CORRECTIONS should read  {mapping}")
-        print("\nTell me which one and I will set it from this measurement "
-              "rather than by inference.")
+        print("\nSo, standing where you are now:")
+        print(f"  positive pitch trim  ->  drone moves {names[first]}")
+        print(f"  negative pitch trim  ->  drone moves {names[second]}")
+        print("\nWhichever of those two directions you have been calling "
+              "'backward',\ntell me and I will set hoptest's correction from "
+              "this measurement.")
 
 
 if __name__ == "__main__":
