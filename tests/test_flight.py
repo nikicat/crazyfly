@@ -507,3 +507,60 @@ def test_bias_drift_estimate_explains_a_metre():
     import flightcheck
 
     assert flightcheck.travel_from_bias(1.79) == pytest.approx(1.0, abs=0.15)
+
+
+# --- answering the hop prompt ---------------------------------------------
+
+def apply_answer(answer, roll_trim=0.0, pitch_trim=0.0, invert_pitch=False):
+    """Mirror of hoptest's answer handling, for testing the parsing rules."""
+    directions = [c for c in dict.fromkeys(answer) if c in hoptest.CORRECTIONS]
+    if not directions:
+        return None
+    axes = {hoptest.CORRECTIONS[c][0] for c in directions}
+    if len(axes) < len(directions):
+        return None
+    for letter in directions:
+        axis, direction = hoptest.CORRECTIONS[letter]
+        if axis == "pitch" and invert_pitch:
+            direction = -direction
+        if axis == "roll":
+            roll_trim += direction * hoptest.CORRECTION_STEP
+        else:
+            pitch_trim += direction * hoptest.CORRECTION_STEP
+    return roll_trim, pitch_trim
+
+
+def test_diagonal_answer_moves_both_axes():
+    """Regression: 'rb' was not a key in CORRECTIONS, so it was silently
+    dropped -- the trim never moved and the drone flew the same way again."""
+    result = apply_answer("rb")
+
+    assert result is not None, "'rb' must be accepted"
+    roll_trim, pitch_trim = result
+    assert roll_trim != 0.0, "right drift must move roll trim"
+    assert pitch_trim != 0.0, "back drift must move pitch trim"
+
+
+def test_diagonal_matches_the_two_single_answers():
+    combined = apply_answer("rb")
+    separately = apply_answer("b", *apply_answer("r"))
+    assert combined == separately
+
+
+@pytest.mark.parametrize("answer", ["rl", "fb", "lr"])
+def test_opposite_answers_on_one_axis_are_rejected(answer):
+    """They would cancel, leaving the trim unmoved with no explanation."""
+    assert apply_answer(answer) is None
+
+
+@pytest.mark.parametrize("answer", ["", "x", "zz", "?"])
+def test_answers_with_no_direction_are_rejected(answer):
+    assert apply_answer(answer) is None
+
+
+def test_answer_order_does_not_matter():
+    assert apply_answer("rb") == apply_answer("br")
+
+
+def test_repeated_letters_apply_once():
+    assert apply_answer("rr") == apply_answer("r")

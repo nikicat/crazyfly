@@ -197,44 +197,64 @@ def main() -> None:
 
             answer = input(
                 "  Which way did it go?  [r]ight [l]eft [f]orward [b]ack\n"
+                "  Combine them for a diagonal, e.g. 'rb' for right and back.\n"
                 "  [n] it stayed put   [t] it never lifted   [enter] skip: "
             ).strip().lower()
 
-            if answer == "n":
+            if not answer:
+                continue
+            if "n" in answer:
                 print("\nTrimmed. Saving.")
                 break
-            if answer == "t":
+            if "t" in answer:
                 args.thrust = min(60000, args.thrust + 2000)
                 print(f"  raising thrust to {args.thrust}")
                 continue
-            if answer not in CORRECTIONS:
+
+            # A drift is usually diagonal, so accept any combination rather
+            # than only the four single letters. Silently ignoring anything
+            # else meant an answer of "rb" changed nothing at all, with no
+            # sign that it had been dropped.
+            directions = [c for c in dict.fromkeys(answer) if c in CORRECTIONS]
+            unknown = [c for c in dict.fromkeys(answer) if c not in CORRECTIONS]
+            if not directions:
+                print(f"  '{answer}' has no direction in it, so nothing changed."
+                      f"\n  Use r, l, f, b -- combined if it went diagonally.")
+                continue
+            if unknown:
+                print(f"  (ignoring {', '.join(unknown)})")
+
+            axes = {CORRECTIONS[c][0] for c in directions}
+            if len(axes) < len(directions):
+                print(f"  '{answer}' asks for two opposite corrections on one "
+                      f"axis, which\n  cancel out. Nothing changed.")
                 continue
 
             # Same drift repeating means the trim is moving the wrong way --
             # the correction should reduce it, not leave it unchanged.
-            repeats = repeats + 1 if answer == last_answer else 1
-            last_answer = answer
+            normalised = "".join(sorted(directions))
+            repeats = repeats + 1 if normalised == last_answer else 1
+            last_answer = normalised
             if repeats >= 3:
-                axis_name = CORRECTIONS[answer][0]
-                print(f"\n  That is 3 hops drifting the same way, so the {axis_name}\n"
+                moved = " and ".join(sorted(axes))
+                print(f"\n  That is 3 hops drifting the same way, so the {moved}\n"
                       "  correction is going backwards. Stop and restart with:")
-                if axis_name == "pitch":
-                    flag = "" if args.invert_pitch else " --invert-pitch"
-                    print(f"    hoptest.py --reset-trim{flag}")
-                else:
-                    print("    hoptest.py --reset-trim")
+                flag = "" if args.invert_pitch or "pitch" not in axes else " --invert-pitch"
+                print(f"    hoptest.py --reset-trim{flag}")
                 print("  (or answer the opposite direction to walk it back)\n")
 
-            axis, direction = CORRECTIONS[answer]
-            if axis == "pitch" and args.invert_pitch:
-                direction = -direction
-            if axis == "roll":
-                roll_trim = clamp(roll_trim + direction * CORRECTION_STEP,
-                                  -TRIM_LIMIT, TRIM_LIMIT)
-            else:
-                pitch_trim = clamp(pitch_trim + direction * CORRECTION_STEP,
-                                   -TRIM_LIMIT, TRIM_LIMIT)
-            print(f"  {axis} trim -> {roll_trim if axis == 'roll' else pitch_trim:+.1f}")
+            for letter in directions:
+                axis, direction = CORRECTIONS[letter]
+                if axis == "pitch" and args.invert_pitch:
+                    direction = -direction
+                if axis == "roll":
+                    roll_trim = clamp(roll_trim + direction * CORRECTION_STEP,
+                                      -TRIM_LIMIT, TRIM_LIMIT)
+                else:
+                    pitch_trim = clamp(pitch_trim + direction * CORRECTION_STEP,
+                                       -TRIM_LIMIT, TRIM_LIMIT)
+
+            print(f"  trim -> roll {roll_trim:+.1f}, pitch {pitch_trim:+.1f}")
             if abs(roll_trim) >= TRIM_LIMIT or abs(pitch_trim) >= TRIM_LIMIT:
                 print("  Trim is at its limit. Something is mechanically off --\n"
                       "  check props, motor mounts and battery position.")
