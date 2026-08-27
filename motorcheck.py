@@ -46,6 +46,12 @@ HOLD_SECONDS = 4.0       # steady lean, long enough to watch the props
 DEFAULT_THRUST = 15000   # low enough that the losing motor reaches zero
 MIN_CORRELATION = 0.5
 
+# The losing motor floors at (thrust - differential), so when it is still
+# spinning the shortfall is exactly how much the base thrust has to come down.
+STOP_MARGIN = 600        # aim a little past zero, not exactly at it
+MIN_SPIN_THRUST = 4000   # below this the winning motors stop too
+MAX_ATTEMPTS = 3
+
 MOTORS = ("motor.m1", "motor.m2", "motor.m3", "motor.m4")
 VARIABLES = dict.fromkeys(MOTORS, "int32_t")
 
@@ -169,18 +175,35 @@ def main() -> None:
         print("Answers are relative to the drone's own front, as you know it.\n")
 
         seen = {}
+        thrust = args.thrust
         for label, pitch, motor in ((f"{args.pitch:+.0f}", +args.pitch, low_on_plus),
                                     (f"{-args.pitch:+.0f}", -args.pitch, low_on_minus)):
             print(f"  Holding {label} deg for {HOLD_SECONDS:.0f}s -- watch for "
                   f"the propeller that STOPS.")
             input("  Press Enter when ready: ")
-            _c, held = drive(scf, args.thrust, [(pitch, HOLD_SECONDS)])
-            floor = min((v for _t, v in held[motor]), default=None)
-            if floor is not None and floor > 0:
-                print(f"  ({motor} bottomed out at {floor:.0f}, so it slowed but "
-                      f"never stopped.\n"
-                      f"   If you could not tell, Ctrl-C and retry with "
-                      f"--thrust {max(8000, args.thrust - 4000)}.)")
+
+            for attempt in range(MAX_ATTEMPTS):
+                _c, held = drive(scf, thrust, [(pitch, HOLD_SECONDS)])
+                floor = min((v for _t, v in held[motor]), default=0.0)
+                if floor <= 0:
+                    print(f"  ({motor} reached zero -- that propeller stopped.)")
+                    break
+
+                # floor = thrust - differential, so dropping the base thrust by
+                # the floor is exactly what puts the losing motor on the stop.
+                lowered = int(thrust - floor - STOP_MARGIN)
+                if lowered < MIN_SPIN_THRUST or attempt == MAX_ATTEMPTS - 1:
+                    print(f"  ({motor} bottomed out at {floor:.0f} and will not "
+                          f"stop without\n   the other motors quitting too. "
+                          f"Watch for the slowest instead.)")
+                    break
+
+                print(f"  ({motor} only reached {floor:.0f}, still spinning. "
+                      f"Lowering thrust\n   to {lowered} and repeating -- watch "
+                      f"again.)")
+                thrust = lowered
+                input("  Press Enter when ready: ")
+
             answer = input("  Which arm stopped?  [f] front  [b] back  "
                            "[l] left  [r] right: ").strip().lower()[:1]
             if answer not in ("f", "b", "l", "r"):
