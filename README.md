@@ -77,6 +77,8 @@ uv run info.py
 | `trimcheck.py` | Diagnose drift: gyro, sensor offset, or mechanical. |
 | `hoptest.py` | Bounded hops for trimming indoors; lands on a timer. |
 | `flightcheck.py` | Is it actually airborne? Run before trusting any trim result. |
+| `motorcheck.py` | Find the pitch sign on the ground, by which motors spin up. |
+| `signals.py` | Recovering a delayed response from the signal that caused it. |
 | `orient.py` | Work out which physical edge is the front, by tilting it. |
 | `linkcheck.py` | Low-level radio diagnostic. **Start here when something is wrong.** Needs no working firmware. |
 | `scan.py` | Sweep all channels and datarates for drones in range. |

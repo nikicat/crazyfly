@@ -438,12 +438,12 @@ def test_best_fit_recovers_the_telemetry_lag(true_lag):
 def test_ignoring_lag_hides_the_response():
     """Regression: slicing samples by wall-clock phase averaged the previous
     lean into the current one, so a flying drone measured as barely moving."""
-    import flightcheck
 
     commands, samples = synth_flight(0.35)
 
-    naive = flightcheck.fit_at_lag(commands, samples, 0.0)
-    _, corrected_gain, _ = flightcheck.best_fit(commands, samples)
+    import signals
+    naive = signals.fit_at_lag(commands, samples, 0.0)
+    _, corrected_gain, _ = signals.best_fit(commands, samples)
 
     assert naive is not None
     assert abs(naive[1]) < abs(corrected_gain), "lag correction must help"
