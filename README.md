@@ -177,18 +177,19 @@ be slightly off by 3.6 V.
 Drift grows with the *square* of flight time, which is why free flight feels
 unmanageable indoors while a short hop is easy to contain. At a 0.3 degree lean:
 
-| hop | drift |
+| hover | drift |
 |---|---|
+| 1 s | 3 cm |
 | 2 s | 11 cm |
-| 3 s | 26 cm |
 | 5 s | 71 cm |
 | 10 s | 2.8 m |
 
 So the workflow is: take the offset off the bench with `trimcheck.py` (no
 flying at all), then confirm it with `hoptest.py`, which ramps up, hovers for a
-couple of seconds, and lands on a timer rather than on your reaction. It asks
+second, and lands on a timer rather than on your reaction. It asks
 which way the drone went, adjusts the trim and repeats, saving to `trim.json`
-at the end. `--hold` is capped at 4 s deliberately.
+at the end. `--hold` defaults to 1 s and is capped at 2 s deliberately, and the hop
+starts the moment you press Enter with no countdown.
 
 Both correction directions are measured on this hardware, not assumed:
 

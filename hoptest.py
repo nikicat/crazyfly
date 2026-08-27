@@ -5,9 +5,12 @@ Flies a short, low, automatically-terminated hop, asks which way it went,
 adjusts the trim and repeats. The drone lands on a timer rather than on your
 reaction, so it cannot run away into a wall.
 
-Drift grows with the square of time -- at a 0.3 degree lean it is about 11 cm
-over 2 s but 2.8 m over 10 s. Keeping each hop to a couple of seconds is what
-makes this safe indoors, so --hold is capped.
+Drift grows with the square of time -- at a 0.3 degree lean it is about 3 cm
+over 1 s but 2.8 m over 10 s. Keeping each hop short is what makes this safe
+indoors, so --hold is capped.
+
+It hops as soon as you press Enter, with no countdown, so have the drone
+placed and your hand clear before you do.
 
 Get the bulk of the trim from trimcheck.py first; this is for confirming and
 fine-tuning it, which is the part that genuinely needs flight.
@@ -37,7 +40,8 @@ from flight import (
 )
 
 RAMP_SECONDS = 0.8       # spin up and down over this, rather than stepping
-MAX_HOLD = 4.0           # refuse longer hops indoors; drift is quadratic
+MAX_HOLD = 2.0           # refuse longer hops indoors; drift is quadratic
+DEFAULT_HOLD = 1.0       # a 0.3 deg lean drifts about 3 cm in this long
 DEFAULT_THRUST = 36000   # deliberately low; raise until it just lifts
 CORRECTION_STEP = 0.4    # degrees per answered hop
 
@@ -131,8 +135,8 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--thrust", type=int, default=DEFAULT_THRUST,
                    help=f"hover thrust, 10001-60000 (default {DEFAULT_THRUST})")
-    p.add_argument("--hold", type=float, default=2.0,
-                   help=f"seconds airborne, capped at {MAX_HOLD}")
+    p.add_argument("--hold", type=float, default=DEFAULT_HOLD,
+                   help=f"seconds hovering, capped at {MAX_HOLD}")
     p.add_argument("--invert-pitch", action="store_true",
                    help="flip pitch correction direction if it makes drift worse")
     p.add_argument("--reset-trim", action="store_true",
@@ -181,12 +185,9 @@ def main() -> None:
         while True:
             print(f"Trim: roll {roll_trim:+.1f}, pitch {pitch_trim:+.1f}   "
                   f"thrust {args.thrust}")
-            if input("Enter to hop, or 'q' to finish: ").strip().lower() == "q":
+            if input("Enter to hop (no countdown), or 'q' to finish: ").strip().lower() == "q":
                 break
 
-            for count in (3, 2, 1):
-                print(f"  {count} ...", flush=True)
-                time.sleep(0.7)
             reason = hop(cf, args.thrust, hold, roll_trim, pitch_trim)
             print(f"  landed ({reason}).")
             if reason == "interrupted":
