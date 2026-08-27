@@ -390,15 +390,21 @@ def test_flight_applies_the_base_trim(monkeypatch):
 
 # --- flightcheck must see through telemetry lag ---------------------------
 
-def synth_flight(true_lag, lean=3.0, lean_seconds=0.5, dt=0.03, sample_dt=0.05):
+def synth_flight(true_lag, lean=3.0, lean_seconds=0.4, dt=0.03,
+                 sample_dt=0.05, cycles=3, gain=-1.0):
     """Commands plus estimator samples delayed by `true_lag`.
 
-    The estimator response is inverted, matching cflib transmitting -pitch.
+    The response is inverted by default, matching cflib transmitting -pitch.
     """
     start = 1000.0
+    phases = [(0.0, 0.8)]
+    for _ in range(cycles):
+        phases.append((+lean, lean_seconds))
+        phases.append((-lean, lean_seconds))
+    phases.append((0.0, 0.8))
+
     commands, clock = [], start
-    for offset, duration in ((0.0, 0.8), (+lean, lean_seconds),
-                             (-lean, lean_seconds), (0.0, 0.8)):
+    for offset, duration in phases:
         for _ in range(int(duration / dt)):
             commands.append((clock, offset))
             clock += dt
@@ -412,7 +418,7 @@ def synth_flight(true_lag, lean=3.0, lean_seconds=0.5, dt=0.03, sample_dt=0.05):
                 offset = command_offset
             else:
                 break
-        samples.append((stamp, -offset))
+        samples.append((stamp, gain * offset))
         stamp += sample_dt
     return commands, samples
 
@@ -422,25 +428,62 @@ def test_best_fit_recovers_the_telemetry_lag(true_lag):
     import flightcheck
 
     commands, samples = synth_flight(true_lag)
-    lag, response = flightcheck.best_fit(commands, samples)
+    lag, gain, correlation = flightcheck.best_fit(commands, samples)
 
     assert lag == pytest.approx(true_lag, abs=0.06)
-    assert response == pytest.approx(-6.0, abs=0.5)
+    assert gain == pytest.approx(-1.0, abs=0.25)
+    assert abs(correlation) > 0.9
 
 
 def test_ignoring_lag_hides_the_response():
     """Regression: slicing samples by wall-clock phase averaged the previous
-    lean into the current one, so a flying drone measured as barely moving --
-    0.77 deg of a possible 6, which read as 'not flying'."""
+    lean into the current one, so a flying drone measured as barely moving."""
     import flightcheck
 
     commands, samples = synth_flight(0.35)
 
-    naive = flightcheck.response_at_lag(commands, samples, 0.0)
-    corrected = flightcheck.best_fit(commands, samples)[1]
+    naive = flightcheck.fit_at_lag(commands, samples, 0.0)
+    _, corrected_gain, _ = flightcheck.best_fit(commands, samples)
 
-    assert abs(naive) < 1.5, "the naive reading should look like no response"
-    assert abs(corrected) > 5.0, "the lag-corrected reading should be clear"
+    assert naive is not None
+    assert abs(naive[1]) < abs(corrected_gain), "lag correction must help"
+    assert abs(corrected_gain) == pytest.approx(1.0, abs=0.25)
+
+
+def test_gain_is_bounded_so_a_bad_fit_cannot_claim_188_percent():
+    """Regression: selecting the lag that maximised the raw response reported
+    188% of a physically possible answer, at the edge of the search range.
+    Gain is a regression slope, so a real tracking response cannot exceed ~1."""
+    import flightcheck
+
+    for true_lag in (0.0, 0.15, 0.3, 0.45):
+        commands, samples = synth_flight(true_lag)
+        _, gain, _ = flightcheck.best_fit(commands, samples)
+        assert abs(gain) < flightcheck.IMPLAUSIBLE_GAIN, (
+            f"gain {gain:+.2f} exceeds what the drone can physically do")
+
+
+def test_grounded_drone_reads_as_not_tracking():
+    """On the ground the attitude cannot follow, so the gain collapses."""
+    import flightcheck
+
+    commands, samples = synth_flight(0.2, gain=-0.05)
+    _, gain, _ = flightcheck.best_fit(commands, samples)
+
+    assert abs(gain) < flightcheck.TRACKING_GAIN
+
+
+def test_noise_alone_does_not_correlate():
+    """Random attitude must not be mistaken for a tracking response."""
+    import flightcheck
+
+    commands, _ = synth_flight(0.0)
+    values = [0.7, -1.3, 0.2, 1.9, -0.4, 0.9, -1.1, 0.3, 1.4, -0.8]
+    samples = [(t, values[i % len(values)])
+               for i, (t, _offset) in enumerate(commands[::2])]
+
+    _, _, correlation = flightcheck.best_fit(commands, samples)
+    assert abs(correlation) < flightcheck.MIN_CORRELATION
 
 
 def test_bias_drift_estimate_explains_a_metre():

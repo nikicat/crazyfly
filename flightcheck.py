@@ -39,10 +39,18 @@ from flight import DT, MIN_THRUST, Interruptible, load_trim, stop_motors
 GRAVITY = 9.81
 RAMP_SECONDS = 0.8
 PROBE_PITCH = 3.0        # degrees of deliberate lean to command
-LEAN_SECONDS = 0.5       # each lean; the second one cancels the first
-TRACKING_FRACTION = 0.4  # measured/commanded above this counts as following
-MAX_LAG = 1.0            # widest telemetry delay to search for, seconds
-LAG_STEP = 0.05
+LEAN_SECONDS = 0.4       # each lean; the next one cancels it
+LEAN_CYCLES = 3          # repeat, so there is enough signal to fit a lag to
+
+TRACKING_GAIN = 0.4      # |gain| above this counts as following the command
+MIN_CORRELATION = 0.5    # below this the fit is noise, whatever the gain says
+IMPLAUSIBLE_GAIN = 2.0   # above this the fit is wrong, not the drone
+MIN_PAIRS = 8            # fewer paired samples than this cannot support a fit
+
+# A real link delay is a few hundred ms. Searching much further lets a lag win
+# by lining the leans up with unrelated parts of the flight.
+MAX_LAG = 0.6
+LAG_STEP = 0.02
 
 VARIABLES = {"stabilizer.pitch": "float", "stabilizer.roll": "float"}
 
@@ -58,7 +66,8 @@ def travel_estimate(lean_deg: float, lean_seconds: float) -> float:
     return accel * lean_seconds ** 2
 
 
-def fly(scf, thrust: int, base_pitch: float, lean: float, lean_seconds: float
+def fly(scf, thrust: int, base_pitch: float, lean: float, lean_seconds: float,
+        base_roll: float = 0.0, cycles: int = LEAN_CYCLES
         ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     """Fly ramp / lean / counter-lean / ramp.
 
@@ -74,12 +83,14 @@ def fly(scf, thrust: int, base_pitch: float, lean: float, lean_seconds: float
     with cfenv.record_log(scf, VARIABLES) as raw, Interruptible() as interrupt:
         try:
             cf.commander.send_setpoint(0, 0, 0, 0)
-            phases = (
-                ("up", RAMP_SECONDS, 0.0),
-                ("plus", lean_seconds, lean),
-                ("minus", lean_seconds, -lean),
-                ("down", RAMP_SECONDS, 0.0),
-            )
+            phases = [("up", RAMP_SECONDS, 0.0)]
+            # Repeat the pair: one cycle is too little signal to fit a lag to,
+            # and each cycle cancels its own velocity so travel stays bounded.
+            for _ in range(cycles):
+                phases.append(("plus", lean_seconds, lean))
+                phases.append(("minus", lean_seconds, -lean))
+            phases.append(("down", RAMP_SECONDS, 0.0))
+
             for phase, duration, offset in phases:
                 start = time.time()
                 while True:
@@ -98,7 +109,7 @@ def fly(scf, thrust: int, base_pitch: float, lean: float, lean_seconds: float
                         level = thrust
 
                     pitch = base_pitch + offset
-                    cf.commander.send_setpoint(0, pitch, 0, int(level))
+                    cf.commander.send_setpoint(base_roll, pitch, 0, int(level))
                     commands.append((now, offset))
                     # Drain whatever telemetry has arrived, stamped with now.
                     while len(samples) < len(raw):
@@ -110,45 +121,76 @@ def fly(scf, thrust: int, base_pitch: float, lean: float, lean_seconds: float
     return commands, samples
 
 
-def response_at_lag(commands, samples, lag: float) -> float | None:
-    """Mean pitch while +lean was commanded, minus while -lean was, at `lag`.
-
-    Returns None when either group is empty at this offset.
-    """
+def paired_at_lag(commands, samples, lag: float
+                  ) -> tuple[list[float], list[float]]:
+    """Pair each sample with the lean commanded `lag` earlier."""
+    commanded: list[float] = []
+    measured: list[float] = []
     if not commands:
-        return None
-    schedule = [(t, offset) for t, offset in commands]
-    plus: list[float] = []
-    minus: list[float] = []
+        return commanded, measured
 
     index = 0
     for stamp, pitch in samples:
         target = stamp - lag
-        while index + 1 < len(schedule) and schedule[index + 1][0] <= target:
+        if target < commands[0][0] or target > commands[-1][0]:
+            continue        # outside the commanded window; nothing to pair with
+        while index + 1 < len(commands) and commands[index + 1][0] <= target:
             index += 1
-        while index > 0 and schedule[index][0] > target:
+        while index > 0 and commands[index][0] > target:
             index -= 1
-        offset = schedule[index][1]
-        if offset > 0:
-            plus.append(pitch)
-        elif offset < 0:
-            minus.append(pitch)
+        commanded.append(commands[index][1])
+        measured.append(pitch)
+    return commanded, measured
 
-    if not plus or not minus:
+
+def fit_at_lag(commands, samples, lag: float) -> tuple[float, float] | None:
+    """Return (correlation, gain) of measured pitch against commanded lean.
+
+    Correlation is bounded to [-1, 1], so unlike a raw difference of means it
+    cannot be inflated by an offset that happens to split the data unevenly --
+    which is how maximising the response picked a nonsense lag at the edge of
+    the search and reported 188% of a possible answer.
+
+    Gain is degrees of estimate per degree commanded: about -1 when the drone
+    tracks, since cflib transmits -pitch.
+    """
+    commanded, measured = paired_at_lag(commands, samples, lag)
+    if len(commanded) < MIN_PAIRS:
         return None
-    return statistics.fmean(plus) - statistics.fmean(minus)
+    if len({round(value, 6) for value in commanded}) < 2:
+        return None         # only one lean represented; nothing to correlate
+
+    mean_c = statistics.fmean(commanded)
+    mean_m = statistics.fmean(measured)
+    var_c = sum((c - mean_c) ** 2 for c in commanded)
+    var_m = sum((m - mean_m) ** 2 for m in measured)
+    if var_c <= 0 or var_m <= 0:
+        return None
+
+    covariance = sum((c - mean_c) * (m - mean_m)
+                     for c, m in zip(commanded, measured, strict=True))
+    correlation = covariance / math.sqrt(var_c * var_m)
+    gain = covariance / var_c
+    return correlation, gain
 
 
-def best_fit(commands, samples) -> tuple[float, float]:
-    """Find the telemetry lag giving the strongest response, and that response."""
-    best_lag, best_response = 0.0, 0.0
+def best_fit(commands, samples) -> tuple[float, float, float]:
+    """Find the telemetry lag that best explains the data.
+
+    Returns (lag, gain, correlation). Selects on correlation rather than on
+    the size of the response, so a lag cannot win merely by grouping the
+    samples lopsidedly.
+    """
+    best = (0.0, 0.0, 0.0)
     lag = 0.0
     while lag <= MAX_LAG:
-        response = response_at_lag(commands, samples, lag)
-        if response is not None and abs(response) > abs(best_response):
-            best_lag, best_response = lag, response
+        fit = fit_at_lag(commands, samples, lag)
+        if fit is not None:
+            correlation, gain = fit
+            if abs(correlation) > abs(best[2]):
+                best = (lag, gain, correlation)
         lag += LAG_STEP
-    return best_lag, best_response
+    return best
 
 
 def main() -> None:
@@ -162,11 +204,14 @@ def main() -> None:
                    help=f"seconds per lean (default {LEAN_SECONDS})")
     p.add_argument("--pitch-trim", type=float, default=None,
                    help="fly at this pitch trim (default: from trim.json)")
+    p.add_argument("--roll-trim", type=float, default=None,
+                   help="fly at this roll trim (default: from trim.json)")
     p.add_argument("--uri", default=None)
     args = p.parse_args()
 
     saved_roll, saved_pitch = load_trim()
     base_pitch = saved_pitch if args.pitch_trim is None else args.pitch_trim
+    base_roll = saved_roll if args.roll_trim is None else args.roll_trim
 
     cfenv.init()
     uri = cfenv.resolve_uri(args.uri)
@@ -177,56 +222,85 @@ def main() -> None:
             cfenv.sample_series(scf, {"pm.vbat": "float"}, count=3)["pm.vbat"])
         print(f"Connected. Battery {vbat:.2f} V")
 
-        resting = statistics.fmean(
-            cfenv.sample_series(scf, {"stabilizer.pitch": "float"},
-                                count=10)["stabilizer.pitch"])
-        print(f"Resting pitch on the ground: {resting:+.2f} deg")
+        rest = cfenv.sample_series(scf, VARIABLES, count=10)
+        resting = statistics.fmean(rest["stabilizer.pitch"])
+        resting_roll = statistics.fmean(rest["stabilizer.roll"])
+        print(f"Resting on the ground: pitch {resting:+.2f}, "
+              f"roll {resting_roll:+.2f} deg")
 
+        # Roll passes through unchanged, so its trim is the bias as measured;
+        # pitch is negated on the wire, so its trim is the negated bias.
         suggested = -resting
+        suggested_roll = resting_roll
         if base_pitch == 0.0:
             print(f"\nFlying at zero pitch trim, so the {resting:+.2f} deg bias\n"
                   f"becomes a real lean for the whole flight -- expect roughly\n"
                   f"{travel_from_bias(resting):.1f} m of drift on top of the probe.\n"
                   f"Pass --pitch-trim {suggested:+.1f} to cancel it.")
         else:
-            print(f"Flying at pitch trim {base_pitch:+.1f} deg.")
+            print(f"Flying at pitch trim {base_pitch:+.1f}, "
+                  f"roll trim {base_roll:+.1f} deg.")
+            if base_roll == 0.0 and abs(resting_roll) > 0.3:
+                print(f"  Roll trim is zero while the roll bias is "
+                      f"{resting_roll:+.2f} deg, so expect sideways drift.\n"
+                      f"  Pass --roll-trim {suggested_roll:+.1f} to cancel it.")
 
-        travel = travel_estimate(args.lean, args.lean_time)
-        print(f"\nOne hop at thrust {args.thrust}: {args.lean:.0f} deg lean for "
-              f"{args.lean_time:.1f}s each way, about {travel * 100:.0f} cm.")
+        travel = travel_estimate(args.lean, args.lean_time) * LEAN_CYCLES
+        print(f"\nOne hop at thrust {args.thrust}: {LEAN_CYCLES} cycles of "
+              f"{args.lean:.0f} deg for {args.lean_time:.1f}s each way, "
+              f"about {travel * 100:.0f} cm.")
         print("Ctrl-C aborts and lands.\n")
         input("Press Enter to start: ")
 
         commands, samples = fly(scf, args.thrust, base_pitch, args.lean,
-                                args.lean_time)
-        if len(samples) < 4:
-            print("\nToo little telemetry to judge. Is the log task wedged?")
+                                args.lean_time, base_roll=base_roll)
+        if len(samples) < MIN_PAIRS:
+            print(f"\nOnly {len(samples)} telemetry samples arrived, too few to\n"
+                  "judge. Is the log task wedged? Power-cycle and retry.")
             return
 
-        lag, response = best_fit(commands, samples)
-        expected = 2 * args.lean
-
+        lag, gain, correlation = best_fit(commands, samples)
         print(f"\n  telemetry lag  {lag * 1000:.0f} ms")
-        print(f"  response       {response:+.2f} deg of a possible "
-              f"{expected:.0f} ({abs(response) / expected * 100:.0f}%)\n")
+        print(f"  correlation    {correlation:+.2f}")
+        print(f"  gain           {gain:+.2f} deg per deg commanded "
+              f"({abs(gain) * 100:.0f}%)")
+        print(f"  samples        {len(samples)}\n")
 
-        if abs(response) < expected * TRACKING_FRACTION:
-            print("The attitude does not follow the command, so the drone is\n"
-                  "NOT flying -- the ground is holding it.\n")
+        if abs(correlation) < MIN_CORRELATION:
+            print("The measured attitude does not correlate with what was\n"
+                  "commanded, so this tells us nothing either way. Usually too\n"
+                  "few samples got through. Power-cycle the drone and retry;\n"
+                  "raising --lean-time gives the fit more to work with.")
+            return
+
+        if abs(gain) > IMPLAUSIBLE_GAIN:
+            print(f"A gain of {gain:+.2f} is not physically possible -- the drone\n"
+                  "cannot lean more than it was told to. Treat this run as\n"
+                  "unreliable rather than as a measurement, and retry.")
+            return
+
+        if lag >= MAX_LAG - LAG_STEP:
+            print(f"The best fit sits at the {MAX_LAG * 1000:.0f} ms edge of the\n"
+                  "search, so the real lag may be larger and this fit suspect.")
+
+        if abs(gain) < TRACKING_GAIN:
+            print("The attitude barely follows the command, so the drone is\n"
+                  "NOT flying freely -- the ground is still holding it.\n")
             print(f"Raise the thrust and retry:\n"
                   f"    uv run flightcheck.py --thrust {args.thrust + 3000}\n")
             print("If it never lifts, the battery is too flat -- charge it.")
             return
 
         print("The attitude follows the command, so the drone is flying.\n")
-        # Negative response means a positive pitch argument drives the estimate
-        # down, which is what cflib's -pitch on the wire produces.
-        direction = "NEGATIVE" if response < 0 else "POSITIVE"
-        print(f"A positive pitch trim drives the estimate {direction}.")
-        print(f"So holding the drone level needs pitch trim {suggested:+.1f}, "
-              f"cancelling the {resting:+.2f} deg resting bias.\n")
+        # A negative gain is the expected one: cflib transmits -pitch, so a
+        # positive pitch argument drives the estimate down.
+        direction = "NEGATIVE" if gain < 0 else "POSITIVE"
+        print(f"A positive pitch trim drives the estimate {direction}, "
+              f"gain {gain:+.2f}.")
+        print(f"Holding the drone level needs pitch trim {suggested:+.1f} to "
+              f"cancel the {resting:+.2f} deg resting bias.\n")
         print(f"    uv run hoptest.py --thrust {args.thrust} --reset-trim "
-              f"--pitch-trim {suggested:+.1f}")
+              f"--pitch-trim {suggested:+.1f} --roll-trim {suggested_roll:+.1f}")
 
 
 def travel_from_bias(bias_deg: float, seconds: float = 2.6) -> float:
