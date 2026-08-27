@@ -319,7 +319,7 @@ def test_default_probe_stays_within_a_small_room():
     assert travel < 0.30, f"probe would travel {travel * 100:.0f} cm"
 
 
-def test_probe_commands_cancel_out(monkeypatch):
+def test_flight_leans_cancel_out(monkeypatch):
     """The two leans must be equal and opposite, or velocity is left over."""
     import flightcheck
 
@@ -344,8 +344,107 @@ def test_probe_commands_cancel_out(monkeypatch):
     drone = FakeCrazyflie()
     drone.commander = RecordingCommander()
     scf = type("S", (), {"cf": drone})()
-    flightcheck.probe(scf, thrust=30000, lean=3.0, lean_seconds=0.2)
+    commands, _ = flightcheck.fly(scf, thrust=30000, base_pitch=0.0,
+                                  lean=3.0, lean_seconds=0.2)
 
-    assert +3.0 in pitches and -3.0 in pitches
-    assert pitches.count(3.0) == pitches.count(-3.0), "leans are not symmetric"
-    assert sum(pitches) == pytest.approx(0.0, abs=1e-9)
+    offsets = [offset for _, offset in commands]
+    assert +3.0 in offsets and -3.0 in offsets
+    assert offsets.count(3.0) == offsets.count(-3.0), "leans are not symmetric"
+    assert sum(offsets) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_flight_applies_the_base_trim(monkeypatch):
+    """The probe leans around the saved trim, so the drone does not fly off on
+    its own bias during the ramps -- that alone covered about a metre."""
+    import flightcheck
+
+    pitches = []
+
+    class RecordingCommander(FakeCommander):
+        def send_setpoint(self, roll, pitch, yawrate, thrust):
+            super().send_setpoint(roll, pitch, yawrate, thrust)
+            pitches.append(pitch)
+
+    class NullRecorder:
+        def __enter__(self):
+            return []
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(cfenv_module, "record_log",
+                        lambda *_a, **_k: NullRecorder())
+    monkeypatch.setattr(flightcheck, "RAMP_SECONDS", 0.1)
+
+    drone = FakeCrazyflie()
+    drone.commander = RecordingCommander()
+    scf = type("S", (), {"cf": drone})()
+    flightcheck.fly(scf, thrust=30000, base_pitch=-1.8, lean=3.0,
+                    lean_seconds=0.2)
+
+    # Ramp phases command the trim itself, not zero.
+    assert pytest.approx(-1.8) in pitches
+    assert pytest.approx(1.2) in pitches    # -1.8 + 3.0
+    assert pytest.approx(-4.8) in pitches   # -1.8 - 3.0
+
+
+# --- flightcheck must see through telemetry lag ---------------------------
+
+def synth_flight(true_lag, lean=3.0, lean_seconds=0.5, dt=0.03, sample_dt=0.05):
+    """Commands plus estimator samples delayed by `true_lag`.
+
+    The estimator response is inverted, matching cflib transmitting -pitch.
+    """
+    start = 1000.0
+    commands, clock = [], start
+    for offset, duration in ((0.0, 0.8), (+lean, lean_seconds),
+                             (-lean, lean_seconds), (0.0, 0.8)):
+        for _ in range(int(duration / dt)):
+            commands.append((clock, offset))
+            clock += dt
+
+    samples, stamp = [], start
+    while stamp < clock:
+        source = stamp - true_lag
+        offset = 0.0
+        for command_time, command_offset in commands:
+            if command_time <= source:
+                offset = command_offset
+            else:
+                break
+        samples.append((stamp, -offset))
+        stamp += sample_dt
+    return commands, samples
+
+
+@pytest.mark.parametrize("true_lag", [0.0, 0.1, 0.2, 0.35, 0.5])
+def test_best_fit_recovers_the_telemetry_lag(true_lag):
+    import flightcheck
+
+    commands, samples = synth_flight(true_lag)
+    lag, response = flightcheck.best_fit(commands, samples)
+
+    assert lag == pytest.approx(true_lag, abs=0.06)
+    assert response == pytest.approx(-6.0, abs=0.5)
+
+
+def test_ignoring_lag_hides_the_response():
+    """Regression: slicing samples by wall-clock phase averaged the previous
+    lean into the current one, so a flying drone measured as barely moving --
+    0.77 deg of a possible 6, which read as 'not flying'."""
+    import flightcheck
+
+    commands, samples = synth_flight(0.35)
+
+    naive = flightcheck.response_at_lag(commands, samples, 0.0)
+    corrected = flightcheck.best_fit(commands, samples)[1]
+
+    assert abs(naive) < 1.5, "the naive reading should look like no response"
+    assert abs(corrected) > 5.0, "the lag-corrected reading should be clear"
+
+
+def test_bias_drift_estimate_explains_a_metre():
+    """A 1.79 deg resting bias flown untrimmed covers about a metre."""
+    import flightcheck
+
+    assert flightcheck.travel_from_bias(1.79) == pytest.approx(1.0, abs=0.15)
