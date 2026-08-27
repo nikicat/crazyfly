@@ -103,10 +103,14 @@ def main() -> None:
                     else:
                         roll *= DECAY
 
+                    # Positive pitch drops the front motor and flies forward,
+                    # measured with motorcheck.py, so up is positive. It was
+                    # the other way round, which flew the drone backwards when
+                    # you pressed up.
                     if kb.down("up"):
-                        pitch = -MAX_ANGLE
-                    elif kb.down("down"):
                         pitch = MAX_ANGLE
+                    elif kb.down("down"):
+                        pitch = -MAX_ANGLE
                     else:
                         pitch *= DECAY
 

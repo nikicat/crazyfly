@@ -47,22 +47,22 @@ CORRECTION_STEP = 0.4    # degrees per answered hop
 
 # Which way to move each trim when the drone drifts a given way.
 #
-# Both directions are measured on this hardware, not assumed:
+# Pitch is measured, on the ground, with motorcheck.py. On this drone the
+# front motor is m1 and the back is m3, and a positive pitch command drives m1
+# to a standstill -- the front drops, so the drone accelerates forward. A
+# backward drift therefore needs MORE pitch, not less.
 #
-#   roll  - a positive roll argument leans right. The measured -0.33 deg roll
-#           bias predicted the observed rightward drift, so drifting right
-#           needs less roll.
-#   pitch - a positive pitch argument leans BACK, not forward. Commander
-#           .send_setpoint transmits -pitch, which flips the axis relative to
-#           the raw sign. Confirmed in flight: raising pitch trim to correct a
-#           backward drift made the drift worse, so backward needs less pitch.
+# That was worth measuring: inferring it from in-flight drift gave the opposite
+# answer twice, because the drone was pivoting on a leg rather than flying.
 #
-# That matches trimcheck.py, which recommends -pitch_bias for the same reason.
+# Roll has not been measured the same way. It is sent unchanged rather than
+# negated, so a positive roll argument is expected to lean right, but run
+# `motorcheck.py --axis roll` before trusting it.
 CORRECTIONS = {
     "r": ("roll", -1),
     "l": ("roll", +1),
-    "f": ("pitch", +1),
-    "b": ("pitch", -1),
+    "f": ("pitch", -1),
+    "b": ("pitch", +1),
 }
 
 

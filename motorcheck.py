@@ -64,8 +64,9 @@ MOTORS = ("motor.m1", "motor.m2", "motor.m3", "motor.m4")
 VARIABLES = dict.fromkeys(MOTORS, "int32_t")
 
 
-def drive(scf, thrust: int, schedule) -> tuple[list, dict[str, list]]:
-    """Command each (pitch, duration) in turn, recording motor outputs."""
+def drive(scf, thrust: int, schedule, axis: str = "pitch"
+          ) -> tuple[list, dict[str, list]]:
+    """Command each (angle, duration) in turn, recording motor outputs."""
     cf = scf.cf
     commands: list[tuple[float, float]] = []
     series: dict[str, list[tuple[float, float]]] = {m: [] for m in MOTORS}
@@ -81,7 +82,10 @@ def drive(scf, thrust: int, schedule) -> tuple[list, dict[str, list]]:
                     if interrupt.requested:
                         raise KeyboardInterrupt
                     now = time.time()
-                    cf.commander.send_setpoint(0, pitch, 0, thrust)
+                    if axis == "roll":
+                        cf.commander.send_setpoint(pitch, 0, 0, thrust)
+                    else:
+                        cf.commander.send_setpoint(0, pitch, 0, thrust)
                     commands.append((now, pitch))
                     while taken < len(raw):
                         for motor in MOTORS:
@@ -118,7 +122,9 @@ def main() -> None:
     p.add_argument("--thrust", type=int, default=DEFAULT_THRUST,
                    help=f"motor thrust, must not lift (default {DEFAULT_THRUST})")
     p.add_argument("--pitch", type=float, default=PROBE_PITCH,
-                   help=f"degrees of pitch to demand (default {PROBE_PITCH})")
+                   help=f"degrees to demand (default {PROBE_PITCH})")
+    p.add_argument("--axis", choices=("pitch", "roll"), default="pitch",
+                   help="which axis to identify (default pitch)")
     p.add_argument("--uri", default=None)
     args = p.parse_args()
 
@@ -137,12 +143,12 @@ def main() -> None:
             return
 
         # Step 1: alternate, to find which pair is the pitch axis.
-        print(f"\nStep 1: alternating {args.pitch:+.0f} deg, {CYCLES} cycles ...")
+        print(f"\nStep 1: alternating {args.pitch:+.0f} deg of {args.axis}, {CYCLES} cycles ...")
         schedule = []
         for _ in range(CYCLES):
             schedule.append((+args.pitch, PHASE_SECONDS))
             schedule.append((-args.pitch, PHASE_SECONDS))
-        commands, series = drive(scf, args.thrust, schedule)
+        commands, series = drive(scf, args.thrust, schedule, args.axis)
         report = summarise(commands, series)
 
         if len(report) < 4:
@@ -164,8 +170,9 @@ def main() -> None:
 
         ranked = sorted(MOTORS, key=lambda m: abs(report[m]["gain"]), reverse=True)
         pitch_pair, other_pair = ranked[:2], ranked[2:]
-        print(f"\nPitch axis is {pitch_pair[0]} and {pitch_pair[1]}.")
-        print(f"Roll axis is {other_pair[0]} and {other_pair[1]} "
+        other = "roll" if args.axis == "pitch" else "pitch"
+        print(f"\n{args.axis.capitalize()} axis is {pitch_pair[0]} and {pitch_pair[1]}.")
+        print(f"The {other} axis is {other_pair[0]} and {other_pair[1]} "
               f"(they should barely move here).")
         if report[pitch_pair[0]]["gain"] * report[pitch_pair[1]]["gain"] > 0:
             print("\nBoth moved the same way, which is thrust rather than pitch.\n"
@@ -179,7 +186,7 @@ def main() -> None:
         # something you can actually see; which is merely slower is not.
         # Asking about both ends cross-checks the answer, since the pitch pair
         # must sit across the frame from one another.
-        print("\nStep 2: identifying the two pitch arms.")
+        print(f"\nStep 2: identifying the two {args.axis} arms.")
         print("Answers are relative to the drone's own front, as you know it.\n")
 
         # Step 1 already showed how far the differential moves per degree, so
@@ -201,7 +208,7 @@ def main() -> None:
                 print(f"  Holding {pitch:+.0f} deg for {HOLD_SECONDS:.0f}s -- "
                       f"watch for the propeller that STOPS.")
                 input("  Press Enter when ready: ")
-                _c, held = drive(scf, args.thrust, [(pitch, HOLD_SECONDS)])
+                _c, held = drive(scf, args.thrust, [(pitch, HOLD_SECONDS)], args.axis)
                 floor = min((v for _t, v in held[motor]), default=0.0)
                 if floor <= 0:
                     print(f"  ({motor} reached zero -- that propeller stopped.)")
@@ -246,9 +253,9 @@ def main() -> None:
         # Whichever arm drops on a positive pitch command is the direction a
         # positive command sends the drone. That is the whole answer; whether
         # it matches the arm you call the front is a separate question.
-        print(f"\n  positive pitch  ->  drops the {names[first]} arm  ->  "
+        print(f"\n  positive {args.axis}  ->  drops the {names[first]} arm  ->  "
               f"drone accelerates {names[first]}")
-        print(f"  negative pitch  ->  drops the {names[second]} arm  ->  "
+        print(f"  negative {args.axis}  ->  drops the {names[second]} arm  ->  "
               f"drone accelerates {names[second]}")
 
         if first in ("l", "r"):

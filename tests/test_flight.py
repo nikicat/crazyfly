@@ -165,19 +165,35 @@ def test_stop_motors_ignores_sigint():
 @pytest.mark.parametrize("answer, axis, sign", [
     ("r", "roll", -1),
     ("l", "roll", +1),
-    ("f", "pitch", +1),   # pitch is inverted on the wire by send_setpoint
-    ("b", "pitch", -1),
+    ("f", "pitch", -1),
+    ("b", "pitch", +1),   # measured: positive pitch drops the front, flies forward
 ])
 def test_correction_opposes_reported_drift(answer, axis, sign):
     assert hoptest.CORRECTIONS[answer] == (axis, sign)
 
 
-def test_backward_drift_lowers_pitch_trim():
-    """Regression: answering 'back' used to raise pitch trim, which made the
-    drift worse on every subsequent hop."""
+def test_backward_drift_raises_pitch_trim():
+    """Measured on the ground with motorcheck: the front motor is m1, and a
+    positive pitch command drives it to a standstill, so the front drops and
+    the drone flies forward. Correcting a backward drift therefore needs MORE
+    pitch. Inferring this from in-flight drift gave the opposite answer twice,
+    because the drone was pivoting on a leg rather than flying."""
     axis, direction = hoptest.CORRECTIONS["b"]
     assert axis == "pitch"
-    assert direction * hoptest.CORRECTION_STEP < 0
+    assert direction * hoptest.CORRECTION_STEP > 0
+
+
+def test_teleop_up_arrow_flies_forward():
+    """Regression: up sent -MAX_ANGLE, which flew the drone backwards."""
+    import inspect
+
+    import teleop
+
+    source = inspect.getsource(teleop.main)
+    up_index = source.index('kb.down("up")')
+    branch = source[up_index:up_index + 120]
+    assert "pitch = MAX_ANGLE" in branch
+    assert "pitch = -MAX_ANGLE" not in branch.split("elif")[0]
 
 
 # --- trim persistence -----------------------------------------------------

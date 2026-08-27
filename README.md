@@ -143,15 +143,25 @@ otherwise rejects a perfectly still drone every time after the rotation.
 Trim is applied in `teleop.py` as a constant offset on every setpoint, live on
 `[` `]` (roll) and `;` `'` (pitch), saved to `trim.json` on exit.
 
-**Sign convention.** The controller settles where the estimate equals the
-setpoint, so holding the drone truly level needs a setpoint equal to the
-estimator's bias. Roll passes through unchanged, so roll trim is the bias as
-measured. Pitch does not — `Commander.send_setpoint` transmits `-pitch` — so
-the pitch argument is the negated bias. The two axes genuinely differ in sign,
-which is easy to get wrong.
+**Sign convention — measure it, do not reason about it.** Inferring the pitch
+direction from which way the drone drifted gave the wrong answer twice, because
+a drone dragging a leg pivots rather than translates, so the "drift" was not
+flight at all.
 
-This drone measures roughly `roll -0.35, pitch +2.0` degrees at rest. The roll
-offset alone predicts a drift to the right, which is what it does.
+`motorcheck.py` settles it on the ground. On this drone:
+
+```
+m1 -236.9 corr -0.97      m1 is the FRONT arm
+m3 +236.4 corr +0.97      m3 is the BACK arm
+m2, m4 near zero          the roll pair, as plus configuration requires
+```
+
+A positive pitch command drives m1 to a standstill, so the front drops and the
+drone flies **forward**. A backward drift therefore needs **more** pitch trim,
+and up-arrow in `teleop.py` sends positive pitch.
+
+Roll has not been measured the same way — run `motorcheck.py --axis roll`
+before trusting its sign.
 
 ### Which way is front
 
