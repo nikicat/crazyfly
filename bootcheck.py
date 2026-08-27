@@ -41,7 +41,7 @@ def main() -> None:
             "\nTo reflash with current official firmware:\n"
             "  1. download the latest cf2 firmware .zip from\n"
             "     https://github.com/bitcraze/crazyflie-release/releases\n"
-            "  2. .venv/bin/python -m cfloader flash <file>.zip stm32-fw\n"
+            "  2. uv run python -m cfloader flash <file>.zip stm32-fw\n"
         )
     finally:
         bl.close()

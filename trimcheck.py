@@ -25,9 +25,6 @@ import sys
 import time
 from collections import deque
 
-from cflib.crazyflie.log import LogConfig
-from cflib.crazyflie.syncLogger import SyncLogger
-
 import cfenv
 
 SAMPLES = 50          # at 100 ms -> about 5 seconds
@@ -62,53 +59,52 @@ class Reading:
         print(f"    yaw drift {self.yaw_drift:+7.2f} deg over {SAMPLES / 10:.0f} s")
 
 
-def measure(scf) -> Reading:
-    lg = LogConfig(name="att", period_in_ms=100)
-    lg.add_variable("stabilizer.roll", "float")
-    lg.add_variable("stabilizer.pitch", "float")
-    lg.add_variable("stabilizer.yaw", "float")
+VARIABLES = {
+    "stabilizer.roll": "float",
+    "stabilizer.pitch": "float",
+    "stabilizer.yaw": "float",
+}
 
+
+def measure(scf) -> Reading:
     roll: list[float] = []
     pitch: list[float] = []
     yaw: list[float] = []
     window: deque[tuple[float, float]] = deque(maxlen=STEADY_WINDOW)
-    settled = False
-    started = time.time()
+    state = {"settled": False, "started": time.time()}
 
-    with SyncLogger(scf, lg) as logger:
-        for _, data, _ in logger:
-            r = data["stabilizer.roll"]
-            p = data["stabilizer.pitch"]
+    def handle(data) -> bool:
+        r = data["stabilizer.roll"]
+        p = data["stabilizer.pitch"]
 
-            if not settled:
-                window.append((r, p))
-                if len(window) == window.maxlen:
-                    spread = max(statistics.pstdev([w[0] for w in window]),
-                                 statistics.pstdev([w[1] for w in window]))
-                    if spread <= STILL_DEG:
-                        settled = True
-                waited = time.time() - started
-                if not settled and waited > SETTLE_TIMEOUT:
-                    print("\r    estimate never went fully quiet; recording anyway")
-                    settled = True
-                if not settled:
-                    print(f"\r    waiting for the estimate to settle ... {waited:4.1f}s",
-                          end="", flush=True)
-                    continue
-                print("\r" + " " * 50 + "\r", end="")
+        if not state["settled"]:
+            window.append((r, p))
+            if len(window) == window.maxlen:
+                spread = max(statistics.pstdev([w[0] for w in window]),
+                             statistics.pstdev([w[1] for w in window]))
+                if spread <= STILL_DEG:
+                    state["settled"] = True
+            waited = time.time() - state["started"]
+            if not state["settled"] and waited > SETTLE_TIMEOUT:
+                print("\r    estimate never went fully quiet; recording anyway")
+                state["settled"] = True
+            if not state["settled"]:
+                print(f"\r    waiting for the estimate to settle ... {waited:4.1f}s",
+                      end="", flush=True)
+                return False
+            print("\r" + " " * 50 + "\r", end="")
 
-            roll.append(r)
-            pitch.append(p)
-            yaw.append(data["stabilizer.yaw"])
-            print(f"\r    sampling {len(roll)}/{SAMPLES} ...", end="", flush=True)
-            if len(roll) >= SAMPLES:
-                break
+        roll.append(r)
+        pitch.append(p)
+        yaw.append(data["stabilizer.yaw"])
+        print(f"\r    sampling {len(roll)}/{SAMPLES} ...", end="", flush=True)
+        return len(roll) >= SAMPLES
+
+    # Allow for the settle wait plus the recording itself.
+    cfenv.stream_log(scf, VARIABLES, handle,
+                     timeout=SETTLE_TIMEOUT + SAMPLES * 0.1 * 3 + 10)
 
     print("\r" + " " * 34 + "\r", end="")
-    if not roll:
-        # Averaging an empty series raises StatisticsError, which hides the
-        # real cause: the drone stopped answering.
-        raise cfenv.LinkLost(cfenv.NO_TELEMETRY)
     return Reading(roll, pitch, yaw)
 
 
@@ -160,7 +156,7 @@ def advise(roll_bias: float, pitch_bias: float, yaw_drift: float,
     # Roll passes through unchanged, so roll trim is the bias as measured.
     # Pitch does not: cflib transmits -pitch (see Commander.send_setpoint),
     # so the argument must be negated to land on the same estimator value.
-    print(f"    .venv/bin/python teleop.py --roll-trim {roll_bias:+.1f} "
+    print(f"    uv run teleop.py --roll-trim {roll_bias:+.1f} "
           f"--pitch-trim {-pitch_bias:+.1f}")
     print("\n  or adjust live in teleop with [ ] and ; ' -- it saves on exit.")
     print("  Trim cancels a steady lean. If the drone instead accelerates away\n"

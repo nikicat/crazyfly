@@ -14,7 +14,6 @@ import cflib.crtp
 from cflib.crazyflie import Crazyflie
 from cflib.crazyflie.log import LogConfig
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-from cflib.crazyflie.syncLogger import SyncLogger
 from cflib.drivers.crazyradio import Crazyradio
 from usb.core import USBError
 
@@ -36,11 +35,14 @@ class LinkLost(Exception):
 NO_TELEMETRY = """\
 Connected, but no telemetry came back.
 
-The drone stopped answering mid-session. It powers itself off on an idle
-timeout, so that is the usual cause; a low battery or being out of range will
-do the same. Switch it back on and check it with:
+The drone accepted the log block and then sent no data. Its control channel
+still answers, so this is the log task wedged rather than a link problem --
+switching the drone off and on again clears it.
 
-    .venv/bin/python linkcheck.py"""
+If that does not help, the drone may have powered off on its idle timeout, or
+the battery may be too low. Check with:
+
+    uv run linkcheck.py"""
 
 
 class TimedSyncCrazyflie(SyncCrazyflie):
@@ -74,7 +76,7 @@ class TimedSyncCrazyflie(SyncCrazyflie):
             raise ConnectTimeout(
                 f"No response from {self._link_uri} within {self._timeout:.0f} s.\n"
                 "The radio link is up but the firmware never completed the\n"
-                "handshake. Run `python linkcheck.py` to see which layer is alive."
+                "handshake. Run `uv run linkcheck.py` to see which layer is alive."
             )
 
         if not self._is_link_open:
@@ -88,7 +90,7 @@ class TimedSyncCrazyflie(SyncCrazyflie):
                     "The drone powers itself off on an idle timeout, which is the\n"
                     "usual cause. A low battery or being out of range does the\n"
                     "same. Switch it on and check it with:\n\n"
-                    "    .venv/bin/python linkcheck.py"
+                    "    uv run linkcheck.py"
                 )
             raise LinkLost(message)
 
@@ -119,29 +121,78 @@ def connect(uri: str, timeout: float = CONNECT_TIMEOUT) -> TimedSyncCrazyflie:
     return TimedSyncCrazyflie(uri, cf=Crazyflie(rw_cache="./cache"), timeout=timeout)
 
 
-def sample_series(scf, variables: dict[str, str], count: int,
-                  period_ms: int = 100) -> dict[str, list[float]]:
-    """Collect `count` samples of each log variable.
+def stream_log(scf, variables: dict[str, str], handler, timeout: float,
+               period_ms: int = 100) -> None:
+    """Feed each log sample to `handler` until it returns True or time runs out.
 
-    Raises LinkLost rather than returning empty lists: callers averaged the
-    result, so a drone that stopped answering surfaced as a division by zero
-    or an empty-statistics error instead of the real cause.
+    Built on log callbacks rather than SyncLogger because SyncLogger's iterator
+    blocks forever. The firmware can accept and start a log block and then send
+    no data at all -- its control channel answers while the log task is wedged
+    -- and that left every caller hung with no way out but Ctrl-C.
     """
-    config = LogConfig(name="sample", period_in_ms=period_ms)
+    config = LogConfig(name="stream", period_in_ms=period_ms)
     for name, ctype in variables.items():
         config.add_variable(name, ctype)
 
+    done = Event()
+    errors: list[str] = []
+    received = [False]
+
+    def on_data(_timestamp, data, _config) -> None:
+        received[0] = True
+        if handler(data):
+            done.set()
+
+    def on_error(_config, message) -> None:
+        errors.append(str(message))
+        done.set()
+
+    config.data_received_cb.add_callback(on_data)
+    config.error_cb.add_callback(on_error)
+
+    scf.cf.log.add_config(config)
+    if not config.valid:
+        raise LinkLost(
+            f"The drone does not offer all of {', '.join(variables)}.\n"
+            "Its log table of contents lists: "
+            f"{', '.join(sorted(scf.cf.log.toc.toc))}"
+        )
+
+    config.start()
+    try:
+        finished = done.wait(timeout)
+    finally:
+        try:
+            config.stop()
+            config.delete()
+        except Exception:  # noqa: BLE001 - cleanup must not mask the real error
+            pass
+
+    if errors:
+        raise LinkLost(f"The drone rejected the log block: {errors[0]}")
+    if not received[0]:
+        raise LinkLost(NO_TELEMETRY)
+    if not finished:
+        raise LinkLost(
+            f"Telemetry stopped partway through (waited {timeout:.0f} s).\n"
+            "The link is up but the drone stopped sending. Power-cycle it."
+        )
+
+
+def sample_series(scf, variables: dict[str, str], count: int,
+                  period_ms: int = 100) -> dict[str, list[float]]:
+    """Collect `count` samples of each log variable."""
     series: dict[str, list[float]] = {name: [] for name in variables}
     first = next(iter(variables))
-    with SyncLogger(scf, config) as logger:
-        for _, data, _ in logger:
-            for name in variables:
-                series[name].append(data[name])
-            if len(series[first]) >= count:
-                break
 
-    if not series[first]:
-        raise LinkLost(NO_TELEMETRY)
+    def collect(data) -> bool:
+        for name in variables:
+            series[name].append(data[name])
+        return len(series[first]) >= count
+
+    # Generous: three times the nominal duration, and never less than 5 s.
+    timeout = max(5.0, count * period_ms / 1000 * 3)
+    stream_log(scf, variables, collect, timeout=timeout, period_ms=period_ms)
     return series
 
 
