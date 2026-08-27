@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from contextlib import contextmanager
 from threading import Event
 
 import cflib.crtp
@@ -177,6 +178,36 @@ def stream_log(scf, variables: dict[str, str], handler, timeout: float,
             f"Telemetry stopped partway through (waited {timeout:.0f} s).\n"
             "The link is up but the drone stopped sending. Power-cycle it."
         )
+
+
+@contextmanager
+def record_log(scf, variables: dict[str, str], period_ms: int = 50):
+    """Record log samples into a list in the background while you do something.
+
+    Unlike stream_log this does not block, so telemetry can be captured during
+    a flight rather than instead of one.
+    """
+    config = LogConfig(name="record", period_in_ms=period_ms)
+    for name, ctype in variables.items():
+        config.add_variable(name, ctype)
+
+    samples: list[dict] = []
+    config.data_received_cb.add_callback(
+        lambda _ts, data, _cfg: samples.append(dict(data)))
+
+    scf.cf.log.add_config(config)
+    if not config.valid:
+        raise LinkLost(f"The drone does not offer all of {', '.join(variables)}.")
+
+    config.start()
+    try:
+        yield samples
+    finally:
+        try:
+            config.stop()
+            config.delete()
+        except Exception:  # noqa: BLE001 - cleanup must not mask the real error
+            pass
 
 
 def sample_series(scf, variables: dict[str, str], count: int,

@@ -76,6 +76,7 @@ uv run info.py
 | `teleop.py` | Manual keyboard flight, with trim. |
 | `trimcheck.py` | Diagnose drift: gyro, sensor offset, or mechanical. |
 | `hoptest.py` | Bounded hops for trimming indoors; lands on a timer. |
+| `flightcheck.py` | Is it actually airborne? Run before trusting any trim result. |
 | `orient.py` | Work out which physical edge is the front, by tilting it. |
 | `linkcheck.py` | Low-level radio diagnostic. **Start here when something is wrong.** Needs no working firmware. |
 | `scan.py` | Sweep all channels and datarates for drones in range. |
@@ -184,8 +185,17 @@ unmanageable indoors while a short hop is easy to contain. At a 0.3 degree lean:
 | 5 s | 71 cm |
 | 10 s | 2.8 m |
 
+**Check it is actually flying first.** A drone that is dragging a leg pivots
+on that leg instead of translating, so "it drifted back" describes the tipping
+rather than the flight, and corrections based on it point whichever way the
+drone happened to fall — which shows up as a correction making things worse in
+*both* directions. `flightcheck.py` commands a deliberate lean and measures
+whether the attitude actually follows; if it cannot, raise the thrust before
+trimming anything.
+
 So the workflow is: take the offset off the bench with `trimcheck.py` (no
-flying at all), then confirm it with `hoptest.py`, which ramps up, hovers for a
+flying at all), confirm it leaves the ground with `flightcheck.py`, then refine
+with `hoptest.py`, which ramps up, hovers for a
 second, and lands on a timer rather than on your reaction. It asks
 which way the drone went, adjusts the trim and repeats, saving to `trim.json`
 at the end. `--hold` defaults to 1 s and is capped at 2 s deliberately, and the hop
