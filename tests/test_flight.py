@@ -596,3 +596,26 @@ def test_every_command_has_help_text():
 
     for command in cf.app.registered_commands:
         assert command.help, f"{command.name} has no help"
+
+
+def test_hop_and_teleop_share_one_trim_file():
+    """Trim found by hopping must be what teleop flies with, without flags."""
+    import flightcheck
+    import hoptest
+    import teleop
+
+    assert teleop.TRIM_FILE is flight.TRIM_FILE
+    assert hoptest.TRIM_FILE is flight.TRIM_FILE
+    assert teleop.load_trim is flight.load_trim
+    assert hoptest.save_trim is flight.save_trim
+    # flightcheck flies at the saved trim so its probe is not swamped by drift
+    assert flightcheck.load_trim is flight.load_trim
+
+
+def test_hop_result_is_what_teleop_starts_from(tmp_path, monkeypatch):
+    monkeypatch.setattr(flight, "TRIM_FILE", tmp_path / "trim.json")
+
+    flight.save_trim(-1.2, 2.8)          # as hoptest does on exit
+    roll, pitch = flight.load_trim()      # as teleop does on entry
+
+    assert (roll, pitch) == (-1.2, 2.8)
