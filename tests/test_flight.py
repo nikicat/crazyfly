@@ -22,6 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import cfenv as cfenv_module  # noqa: E402
 import flight  # noqa: E402
 import hoptest  # noqa: E402
 import orient  # noqa: E402
@@ -285,3 +286,66 @@ def test_stream_log_times_out_instead_of_hanging(monkeypatch):
 
     assert time.monotonic() - started < 5, "stream_log did not return promptly"
     assert "no telemetry" in str(excinfo.value).lower()
+
+
+# --- flightcheck stays inside a small room --------------------------------
+
+def test_travel_estimate_matches_integrated_motion():
+    """The closed form a*t^2 should match integrating the two lean phases."""
+    import math
+
+    import flightcheck
+
+    lean, seconds = 3.0, 0.5
+    accel = flightcheck.GRAVITY * math.tan(math.radians(lean))
+
+    dt, velocity, position = 0.0005, 0.0, 0.0
+    for phase_accel in (accel, -accel):
+        for _ in range(int(seconds / dt)):
+            velocity += phase_accel * dt
+            position += velocity * dt
+
+    assert flightcheck.travel_estimate(lean, seconds) == pytest.approx(position,
+                                                                      rel=0.02)
+    assert velocity == pytest.approx(0.0, abs=1e-6), "counter-lean must stop it"
+
+
+def test_default_probe_stays_within_a_small_room():
+    """Regression: holding one lean through the descent covered 1-2 m."""
+    import flightcheck
+
+    travel = flightcheck.travel_estimate(flightcheck.PROBE_PITCH,
+                                         flightcheck.LEAN_SECONDS)
+    assert travel < 0.30, f"probe would travel {travel * 100:.0f} cm"
+
+
+def test_probe_commands_cancel_out(monkeypatch):
+    """The two leans must be equal and opposite, or velocity is left over."""
+    import flightcheck
+
+    pitches = []
+
+    class RecordingCommander(FakeCommander):
+        def send_setpoint(self, roll, pitch, yawrate, thrust):
+            super().send_setpoint(roll, pitch, yawrate, thrust)
+            pitches.append(pitch)
+
+    class NullRecorder:
+        def __enter__(self):
+            return []
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(cfenv_module, "record_log",
+                        lambda *_a, **_k: NullRecorder())
+    monkeypatch.setattr(flightcheck, "RAMP_SECONDS", 0.1)
+
+    drone = FakeCrazyflie()
+    drone.commander = RecordingCommander()
+    scf = type("S", (), {"cf": drone})()
+    flightcheck.probe(scf, thrust=30000, lean=3.0, lean_seconds=0.2)
+
+    assert +3.0 in pitches and -3.0 in pitches
+    assert pitches.count(3.0) == pitches.count(-3.0), "leans are not symmetric"
+    assert sum(pitches) == pytest.approx(0.0, abs=1e-9)
