@@ -65,30 +65,19 @@ sudo rm /etc/udev/rules.d/99-bitcraze.rules; and sudo udevadm control --reload-r
 
 ## Usage
 
+Everything is reachable through one router:
+
 ```fish
 set -x CF_URI radio://0/40/250K   # skip the slow scan
-uv run info.py
+uv run cf.py --help
+uv run cf.py info
+uv run cf.py hop --thrust 42000 --reset-trim
 ```
 
-| script | what it does |
-|---|---|
-| `info.py` | Connect and report model, firmware, battery, attitude. |
-| `teleop.py` | Manual keyboard flight, with trim. |
-| `trimcheck.py` | Diagnose drift: gyro, sensor offset, or mechanical. |
-| `hoptest.py` | Bounded hops for trimming indoors; lands on a timer. |
-| `flightcheck.py` | Is it actually airborne? Run before trusting any trim result. |
-| `motorcheck.py` | Find the pitch sign on the ground, by which motor slows down. |
-| `signals.py` | Recovering a delayed response from the signal that caused it. |
-| `orient.py` | Work out which physical edge is the front, by tilting it. |
-| `linkcheck.py` | Low-level radio diagnostic. **Start here when something is wrong.** Needs no working firmware. |
-| `scan.py` | Sweep all channels and datarates for drones in range. |
-| `bootcheck.py` | Look for the drone in bootloader mode. |
-| `hover.py` | Autonomous hover. Needs a Flow deck, so it refuses on a 1.0. |
-| `cf1compat.py` | The legacy-protocol patches described above. |
-| `cfenv.py` | Driver init, URI resolution, connect-with-timeout, telemetry. |
-| `flight.py` | Keyboard, trim persistence, setpoint limits, `stop_motors`. |
+Each command is the `run()` of the module beside it, so the options are
+identical either way and `uv run hoptest.py --thrust 42000` still works.
 
-### Flying
+| command ### Flying
 
 ```fish
 uv run teleop.py

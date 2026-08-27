@@ -13,12 +13,14 @@ and the fix is a reflash.
 """
 from __future__ import annotations
 
+import typer
 from cflib.bootloader import Bootloader
 
 import cfenv
 
 
-def main() -> None:
+def run() -> None:
+    """Look for a Crazyflie sitting in bootloader mode."""
     cfenv.init()
 
     print("Scanning for a Crazyflie in bootloader mode (cold boot) ...")
@@ -48,4 +50,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))

@@ -9,10 +9,10 @@ one. Use teleop.py for manual flight instead.
 """
 from __future__ import annotations
 
-import argparse
 import sys
 import time
 
+import typer
 from cflib.crazyflie import Crazyflie
 from cflib.positioning.motion_commander import MotionCommander
 
@@ -31,16 +31,15 @@ def has_flow_deck(cf: Crazyflie) -> bool:
     return False
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--height", type=float, default=0.4, help="hover height in metres")
-    p.add_argument("--seconds", type=float, default=5.0, help="how long to hover")
-    p.add_argument("--uri", default=None)
-    args = p.parse_args()
+def run(
+    height: float = 0.4,
+    seconds: float = 5.0,
+    uri: str | None = None,
+) -> None:
+    """Autonomous takeoff, hover and land. Requires a Flow deck."""
 
     cfenv.init()
-    uri = cfenv.resolve_uri(args.uri)
+    uri = cfenv.resolve_uri(uri)
 
     print(f"Connecting to {uri} ...")
     with cfenv.connect(uri) as scf:
@@ -60,12 +59,12 @@ def main() -> None:
                 "hit something. Attach a Flow deck, or fly manually with teleop.py."
             )
 
-        print(f"Flow deck found. Taking off to {args.height} m ...")
-        with MotionCommander(scf, default_height=args.height):
-            time.sleep(args.seconds)
+        print(f"Flow deck found. Taking off to {height} m ...")
+        with MotionCommander(scf, default_height=height):
+            time.sleep(seconds)
             print("Landing ...")
         print("Landed.")
 
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))

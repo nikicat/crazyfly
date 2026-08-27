@@ -23,8 +23,9 @@ they are being held, which keeps a dropped keypress from latching a roll.
 """
 from __future__ import annotations
 
-import argparse
 import time
+
+import typer
 
 import cfenv
 from flight import (
@@ -48,22 +49,19 @@ from flight import (
 TRIM_STEP = 0.2          # degrees per keypress, live in the air
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--roll-trim", type=float, default=None,
-                   help="roll offset in degrees; negative leans left")
-    p.add_argument("--pitch-trim", type=float, default=None,
-                   help="pitch offset in degrees; negative leans forward")
-    p.add_argument("--uri", default=None)
-    args = p.parse_args()
+def run(
+    roll_trim: float | None = None,
+    pitch_trim: float | None = None,
+    uri: str | None = None,
+) -> None:
+    """Manual keyboard flight, with persistent trim."""
 
     saved_roll, saved_pitch = load_trim()
-    roll_trim = saved_roll if args.roll_trim is None else args.roll_trim
-    pitch_trim = saved_pitch if args.pitch_trim is None else args.pitch_trim
+    roll_trim = saved_roll if roll_trim is None else roll_trim
+    pitch_trim = saved_pitch if pitch_trim is None else pitch_trim
 
     cfenv.init()
-    uri = cfenv.resolve_uri(args.uri)
+    uri = cfenv.resolve_uri(uri)
 
     print(f"Connecting to {uri} ...")
     with cfenv.connect(uri) as scf:
@@ -167,4 +165,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))

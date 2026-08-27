@@ -20,10 +20,11 @@ fine-tuning it, which is the part that genuinely needs flight.
 """
 from __future__ import annotations
 
-import argparse
 import statistics
 import sys
 import time
+
+import typer
 
 import cfenv
 from flight import (
@@ -130,40 +131,32 @@ def hop(cf, thrust: int, hold: float, roll_trim: float, pitch_trim: float) -> st
     return reason
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--thrust", type=int, default=DEFAULT_THRUST,
-                   help=f"hover thrust, 10001-60000 (default {DEFAULT_THRUST})")
-    p.add_argument("--hold", type=float, default=DEFAULT_HOLD,
-                   help=f"seconds hovering, capped at {MAX_HOLD}")
-    p.add_argument("--invert-pitch", action="store_true",
-                   help="flip pitch correction direction if it makes drift worse")
-    p.add_argument("--reset-trim", action="store_true",
-                   help="start from zero trim instead of loading trim.json")
-    p.add_argument("--roll-trim", type=float, default=None,
-                   help="start from this roll trim (e.g. from trimcheck.py)")
-    p.add_argument("--pitch-trim", type=float, default=None,
-                   help="start from this pitch trim (e.g. from trimcheck.py)")
-    p.add_argument("--uri", default=None)
-    args = p.parse_args()
+def run(
+    thrust: int = DEFAULT_THRUST,
+    hold: float = DEFAULT_HOLD,
+    invert_pitch: bool = False,
+    reset_trim: bool = False,
+    roll_trim: float | None = None,
+    pitch_trim: float | None = None,
+    uri: str | None = None,
+) -> None:
+    """Bounded indoor hops that converge on a trim setting."""
 
-    hold = min(args.hold, MAX_HOLD)
-    if hold < args.hold:
+    if hold > MAX_HOLD:
         print(f"Capping hop at {MAX_HOLD}s -- drift grows with time squared.")
+        hold = MAX_HOLD
 
-    if args.reset_trim:
-        roll_trim, pitch_trim = 0.0, 0.0
+    # Start from zero or from the saved trim, then let explicit values win.
+    if reset_trim:
+        start_roll, start_pitch = 0.0, 0.0
         print("Starting from zero trim.")
     else:
-        roll_trim, pitch_trim = load_trim()
-    if args.roll_trim is not None:
-        roll_trim = args.roll_trim
-    if args.pitch_trim is not None:
-        pitch_trim = args.pitch_trim
+        start_roll, start_pitch = load_trim()
+    roll_trim = start_roll if roll_trim is None else roll_trim
+    pitch_trim = start_pitch if pitch_trim is None else pitch_trim
 
     cfenv.init()
-    uri = cfenv.resolve_uri(args.uri)
+    uri = cfenv.resolve_uri(uri)
     print(f"Connecting to {uri} ...")
     with cfenv.connect(uri) as scf:
         cf = scf.cf
@@ -184,11 +177,11 @@ def main() -> None:
         repeats = 0
         while True:
             print(f"Trim: roll {roll_trim:+.1f}, pitch {pitch_trim:+.1f}   "
-                  f"thrust {args.thrust}")
+                  f"thrust {thrust}")
             if input("Enter to hop (no countdown), or 'q' to finish: ").strip().lower() == "q":
                 break
 
-            reason = hop(cf, args.thrust, hold, roll_trim, pitch_trim)
+            reason = hop(cf, thrust, hold, roll_trim, pitch_trim)
             print(f"  landed ({reason}).")
             if reason == "interrupted":
                 # Leave via the normal exit so the trim so far is still saved.
@@ -207,8 +200,8 @@ def main() -> None:
                 print("\nTrimmed. Saving.")
                 break
             if "t" in answer:
-                args.thrust = min(60000, args.thrust + 2000)
-                print(f"  raising thrust to {args.thrust}")
+                thrust = min(60000, thrust + 2000)
+                print(f"  raising thrust to {thrust}")
                 continue
 
             # A drift is usually diagonal, so accept any combination rather
@@ -239,13 +232,13 @@ def main() -> None:
                 moved = " and ".join(sorted(axes))
                 print(f"\n  That is 3 hops drifting the same way, so the {moved}\n"
                       "  correction is going backwards. Stop and restart with:")
-                flag = "" if args.invert_pitch or "pitch" not in axes else " --invert-pitch"
+                flag = "" if invert_pitch or "pitch" not in axes else " --invert-pitch"
                 print(f"    hoptest.py --reset-trim{flag}")
                 print("  (or answer the opposite direction to walk it back)\n")
 
             for letter in directions:
                 axis, direction = CORRECTIONS[letter]
-                if axis == "pitch" and args.invert_pitch:
+                if axis == "pitch" and invert_pitch:
                     direction = -direction
                 if axis == "roll":
                     roll_trim = clamp(roll_trim + direction * CORRECTION_STEP,
@@ -266,4 +259,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))

@@ -28,6 +28,8 @@ from __future__ import annotations
 import statistics
 import sys
 
+import typer
+
 import cfenv
 
 SAMPLES = 15
@@ -65,9 +67,10 @@ def classify(d_roll: float, d_pitch: float) -> tuple[str | None, str, str]:
                   "two arms. Lift a single motor arm instead."), ""
 
 
-def main() -> None:
+def run(uri: str | None = None) -> None:
+    """Work out which arm of the drone is the front, by tilting it."""
     cfenv.init()
-    uri = cfenv.resolve_uri(sys.argv[1] if len(sys.argv) > 1 else None)
+    uri = cfenv.resolve_uri(uri)
 
     print(f"Connecting to {uri} ...")
     with cfenv.connect(uri) as scf:
@@ -108,4 +111,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))

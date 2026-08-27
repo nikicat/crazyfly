@@ -28,10 +28,11 @@ Two things make that harder than it sounds on a Crazyflie 1.0:
 """
 from __future__ import annotations
 
-import argparse
 import math
 import statistics
 import time
+
+import typer
 
 import cfenv
 from flight import DT, MIN_THRUST, Interruptible, load_trim, stop_motors
@@ -116,28 +117,22 @@ def fly(scf, thrust: int, base_pitch: float, lean: float, lean_seconds: float,
     return commands, samples
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--thrust", type=int, default=42000,
-                   help="hover thrust to test (default 42000)")
-    p.add_argument("--lean", type=float, default=PROBE_PITCH,
-                   help=f"degrees of lean to command (default {PROBE_PITCH})")
-    p.add_argument("--lean-time", type=float, default=LEAN_SECONDS,
-                   help=f"seconds per lean (default {LEAN_SECONDS})")
-    p.add_argument("--pitch-trim", type=float, default=None,
-                   help="fly at this pitch trim (default: from trim.json)")
-    p.add_argument("--roll-trim", type=float, default=None,
-                   help="fly at this roll trim (default: from trim.json)")
-    p.add_argument("--uri", default=None)
-    args = p.parse_args()
+def run(
+    thrust: int = 42000,
+    lean: float = PROBE_PITCH,
+    lean_time: float = LEAN_SECONDS,
+    pitch_trim: float | None = None,
+    roll_trim: float | None = None,
+    uri: str | None = None,
+) -> None:
+    """Confirm the drone is airborne before trusting a trim result."""
 
     saved_roll, saved_pitch = load_trim()
-    base_pitch = saved_pitch if args.pitch_trim is None else args.pitch_trim
-    base_roll = saved_roll if args.roll_trim is None else args.roll_trim
+    base_pitch = saved_pitch if pitch_trim is None else pitch_trim
+    base_roll = saved_roll if roll_trim is None else roll_trim
 
     cfenv.init()
-    uri = cfenv.resolve_uri(args.uri)
+    uri = cfenv.resolve_uri(uri)
     print(f"Connecting to {uri} ...")
     with cfenv.connect(uri) as scf:
         scf.wait_for_params()
@@ -168,15 +163,15 @@ def main() -> None:
                       f"{resting_roll:+.2f} deg, so expect sideways drift.\n"
                       f"  Pass --roll-trim {suggested_roll:+.1f} to cancel it.")
 
-        travel = travel_estimate(args.lean, args.lean_time) * LEAN_CYCLES
-        print(f"\nOne hop at thrust {args.thrust}: {LEAN_CYCLES} cycles of "
-              f"{args.lean:.0f} deg for {args.lean_time:.1f}s each way, "
+        travel = travel_estimate(lean, lean_time) * LEAN_CYCLES
+        print(f"\nOne hop at thrust {thrust}: {LEAN_CYCLES} cycles of "
+              f"{lean:.0f} deg for {lean_time:.1f}s each way, "
               f"about {travel * 100:.0f} cm.")
         print("Ctrl-C aborts and lands.\n")
         input("Press Enter to start: ")
 
-        commands, samples = fly(scf, args.thrust, base_pitch, args.lean,
-                                args.lean_time, base_roll=base_roll)
+        commands, samples = fly(scf, thrust, base_pitch, lean,
+                                lean_time, base_roll=base_roll)
         if len(samples) < MIN_PAIRS:
             print(f"\nOnly {len(samples)} telemetry samples arrived, too few to\n"
                   "judge. Is the log task wedged? Power-cycle and retry.")
@@ -210,7 +205,7 @@ def main() -> None:
             print("The attitude barely follows the command, so the drone is\n"
                   "NOT flying freely -- the ground is still holding it.\n")
             print(f"Raise the thrust and retry:\n"
-                  f"    uv run flightcheck.py --thrust {args.thrust + 3000}\n")
+                  f"    uv run flightcheck.py --thrust {thrust + 3000}\n")
             print("If it never lifts, the battery is too flat -- charge it.")
             return
 
@@ -222,7 +217,7 @@ def main() -> None:
               f"gain {gain:+.2f}.")
         print(f"Holding the drone level needs pitch trim {suggested:+.1f} to "
               f"cancel the {resting:+.2f} deg resting bias.\n")
-        print(f"    uv run hoptest.py --thrust {args.thrust} --reset-trim "
+        print(f"    uv run hoptest.py --thrust {thrust} --reset-trim "
               f"--pitch-trim {suggested:+.1f} --roll-trim {suggested_roll:+.1f}")
 
 
@@ -233,4 +228,4 @@ def travel_from_bias(bias_deg: float, seconds: float = 2.6) -> float:
 
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))

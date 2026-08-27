@@ -13,8 +13,7 @@ main MCU that is off, hung, or unflashed.
 """
 from __future__ import annotations
 
-import argparse
-
+import typer
 from cflib.drivers.crazyradio import Crazyradio
 
 import cfenv
@@ -142,22 +141,21 @@ def check(cr: Crazyradio, channel: int, datarate: str, address: int) -> None:
         print("Device acks at the radio layer but does not speak CRTP.")
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--channel", type=int, default=40)
-    p.add_argument("--datarate", choices=sorted(DATARATES), default="250K")
-    p.add_argument("--address", type=lambda s: int(s, 16), default=0xE7E7E7E7E7,
-                   help="5-byte hex address (default E7E7E7E7E7)")
-    args = p.parse_args()
+def run(
+    channel: int = 40,
+    datarate: str = "250K",
+    address: str = "E7E7E7E7E7",
+) -> None:
+    """Low-level radio diagnostic. Needs no working firmware."""
+    if datarate not in DATARATES:
+        raise SystemExit(f"datarate must be one of {', '.join(sorted(DATARATES))}")
 
-    cr = Crazyradio()
-    print(f"Crazyradio firmware {cr.version}\n")
+    radio = Crazyradio()
+    print(f"Crazyradio firmware {radio.version}\n")
     try:
-        check(cr, args.channel, args.datarate, args.address)
+        check(radio, channel, datarate, int(address, 16))
     finally:
-        cr.close()
-
+        radio.close()
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))

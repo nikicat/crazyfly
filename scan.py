@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Scan every radio channel and datarate for Crazyflies in range."""
 import cflib.crtp
+import typer
 
 import cfenv
 
 
-def main() -> None:
+def run() -> None:
+    """Sweep every channel and datarate for Crazyflies in range."""
     cfenv.init()
 
     print("Scanning all channels and datarates (slow, ~20 s) ...")
@@ -22,4 +24,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))

@@ -35,9 +35,10 @@ cannot lift at this thrust but it may skitter, so hold it by the battery.
 """
 from __future__ import annotations
 
-import argparse
 import statistics
 import time
+
+import typer
 
 import cfenv
 from flight import DT, Interruptible, stop_motors
@@ -116,20 +117,18 @@ def summarise(commands, series) -> dict[str, dict]:
     return report
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--thrust", type=int, default=DEFAULT_THRUST,
-                   help=f"motor thrust, must not lift (default {DEFAULT_THRUST})")
-    p.add_argument("--pitch", type=float, default=PROBE_PITCH,
-                   help=f"degrees to demand (default {PROBE_PITCH})")
-    p.add_argument("--axis", choices=("pitch", "roll"), default="pitch",
-                   help="which axis to identify (default pitch)")
-    p.add_argument("--uri", default=None)
-    args = p.parse_args()
+def run(
+    thrust: int = DEFAULT_THRUST,
+    pitch: float = PROBE_PITCH,
+    axis: str = "pitch",
+    uri: str | None = None,
+) -> None:
+    """Find an axis's sign on the ground, by which motor stops."""
+    if axis not in ("pitch", "roll"):
+        raise SystemExit("axis must be pitch or roll")
 
     cfenv.init()
-    uri = cfenv.resolve_uri(args.uri)
+    uri = cfenv.resolve_uri(uri)
     print(f"Connecting to {uri} ...")
     with cfenv.connect(uri) as scf:
         scf.wait_for_params()
@@ -143,12 +142,12 @@ def main() -> None:
             return
 
         # Step 1: alternate, to find which pair is the pitch axis.
-        print(f"\nStep 1: alternating {args.pitch:+.0f} deg of {args.axis}, {CYCLES} cycles ...")
+        print(f"\nStep 1: alternating {pitch:+.0f} deg of {axis}, {CYCLES} cycles ...")
         schedule = []
         for _ in range(CYCLES):
-            schedule.append((+args.pitch, PHASE_SECONDS))
-            schedule.append((-args.pitch, PHASE_SECONDS))
-        commands, series = drive(scf, args.thrust, schedule, args.axis)
+            schedule.append((+pitch, PHASE_SECONDS))
+            schedule.append((-pitch, PHASE_SECONDS))
+        commands, series = drive(scf, thrust, schedule, axis)
         report = summarise(commands, series)
 
         if len(report) < 4:
@@ -170,8 +169,8 @@ def main() -> None:
 
         ranked = sorted(MOTORS, key=lambda m: abs(report[m]["gain"]), reverse=True)
         pitch_pair, other_pair = ranked[:2], ranked[2:]
-        other = "roll" if args.axis == "pitch" else "pitch"
-        print(f"\n{args.axis.capitalize()} axis is {pitch_pair[0]} and {pitch_pair[1]}.")
+        other = "roll" if axis == "pitch" else "pitch"
+        print(f"\n{axis.capitalize()} axis is {pitch_pair[0]} and {pitch_pair[1]}.")
         print(f"The {other} axis is {other_pair[0]} and {other_pair[1]} "
               f"(they should barely move here).")
         if report[pitch_pair[0]]["gain"] * report[pitch_pair[1]]["gain"] > 0:
@@ -186,19 +185,19 @@ def main() -> None:
         # something you can actually see; which is merely slower is not.
         # Asking about both ends cross-checks the answer, since the pitch pair
         # must sit across the frame from one another.
-        print(f"\nStep 2: identifying the two {args.axis} arms.")
+        print(f"\nStep 2: identifying the two {axis} arms.")
         print("Answers are relative to the drone's own front, as you know it.\n")
 
         # Step 1 already showed how far the differential moves per degree, so
         # start from an angle predicted to bottom the motor out rather than
         # from the probing angle, which demonstrably does not.
-        step1_reach = args.thrust - min(report[low_on_plus]["low"],
+        step1_reach = thrust - min(report[low_on_plus]["low"],
                                         report[low_on_minus]["low"])
-        scale = args.thrust / max(1.0, step1_reach)
-        hold_pitch = min(MAX_PROBE_PITCH, args.pitch * scale * PITCH_MARGIN)
-        print(f"Step 1 moved the motors {step1_reach:.0f} of the {args.thrust} "
+        scale = thrust / max(1.0, step1_reach)
+        hold_pitch = min(MAX_PROBE_PITCH, pitch * scale * PITCH_MARGIN)
+        print(f"Step 1 moved the motors {step1_reach:.0f} of the {thrust} "
               f"needed to reach zero,\nso holding {hold_pitch:.0f} deg rather "
-              f"than {args.pitch:.0f}. Base thrust stays at {args.thrust} so "
+              f"than {pitch:.0f}. Base thrust stays at {thrust} so "
               f"every\nmotor keeps turning; only the losing one should stop.\n")
 
         seen = {}
@@ -208,14 +207,14 @@ def main() -> None:
                 print(f"  Holding {pitch:+.0f} deg for {HOLD_SECONDS:.0f}s -- "
                       f"watch for the propeller that STOPS.")
                 input("  Press Enter when ready: ")
-                _c, held = drive(scf, args.thrust, [(pitch, HOLD_SECONDS)], args.axis)
+                _c, held = drive(scf, thrust, [(pitch, HOLD_SECONDS)], axis)
                 floor = min((v for _t, v in held[motor]), default=0.0)
                 if floor <= 0:
                     print(f"  ({motor} reached zero -- that propeller stopped.)")
                     break
 
                 harder = min(MAX_PROBE_PITCH,
-                             abs(pitch) * args.thrust / max(1.0, args.thrust - floor)
+                             abs(pitch) * thrust / max(1.0, thrust - floor)
                              * PITCH_MARGIN)
                 if harder <= abs(pitch) * 1.05 or attempt == MAX_ATTEMPTS - 1:
                     print(f"  ({motor} bottomed out at {floor:.0f} and will not "
@@ -253,9 +252,9 @@ def main() -> None:
         # Whichever arm drops on a positive pitch command is the direction a
         # positive command sends the drone. That is the whole answer; whether
         # it matches the arm you call the front is a separate question.
-        print(f"\n  positive {args.axis}  ->  drops the {names[first]} arm  ->  "
+        print(f"\n  positive {axis}  ->  drops the {names[first]} arm  ->  "
               f"drone accelerates {names[first]}")
-        print(f"  negative {args.axis}  ->  drops the {names[second]} arm  ->  "
+        print(f"  negative {axis}  ->  drops the {names[second]} arm  ->  "
               f"drone accelerates {names[second]}")
 
         if first in ("l", "r"):
@@ -284,4 +283,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))

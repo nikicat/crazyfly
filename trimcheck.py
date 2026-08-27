@@ -19,11 +19,12 @@ does not, so averaging isolates the offset and differencing reveals the slope.
 """
 from __future__ import annotations
 
-import argparse
 import statistics
 import sys
 import time
 from collections import deque
+
+import typer
 
 import cfenv
 
@@ -163,16 +164,14 @@ def advise(roll_bias: float, pitch_bias: float, yaw_drift: float,
           "  harder and harder, the cause is mechanical -- see the checks above.")
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--rotate", action="store_true",
-                   help="take a second reading rotated 180 deg to cancel surface slope")
-    p.add_argument("--uri", default=None)
-    args = p.parse_args()
+def run(
+    rotate: bool = False,
+    uri: str | None = None,
+) -> None:
+    """Diagnose drift: gyro bias, sensor offset, or mechanical."""
 
     cfenv.init()
-    uri = cfenv.resolve_uri(args.uri)
+    uri = cfenv.resolve_uri(uri)
 
     print(f"Connecting to {uri} ...")
     with cfenv.connect(uri) as scf:
@@ -183,7 +182,7 @@ def main() -> None:
         first.show("as placed:")
         check_steady(first)
 
-        if not args.rotate:
+        if not rotate:
             advise(first.roll, first.pitch, first.yaw_drift, slope=None)
             print("\nIf you are unsure the surface is level, re-run with --rotate\n"
                   "to measure the sensor offset independently of it.")
@@ -209,4 +208,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))

@@ -8,7 +8,8 @@ so the fields shown depend on which one answers.
 from __future__ import annotations
 
 import statistics
-import sys
+
+import typer
 
 import cfenv
 
@@ -24,9 +25,10 @@ def param(cf, name: str, default: str = "?") -> str:
     return cf.param.values.get(group, {}).get(key, default)
 
 
-def main() -> None:
+def run(uri: str | None = None) -> None:
+    """Connect and report model, firmware, battery and attitude."""
     cfenv.init()
-    uri = cfenv.resolve_uri(sys.argv[1] if len(sys.argv) > 1 else None)
+    uri = cfenv.resolve_uri(uri)
 
     print(f"Connecting to {uri} ...")
     with cfenv.connect(uri) as scf:
@@ -84,4 +86,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(main)
+    cfenv.run(lambda: typer.run(run))
