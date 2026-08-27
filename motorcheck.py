@@ -7,9 +7,13 @@ the measurement is any good. This asks the same question without lifting off.
 
 At a thrust too low to fly, the drone still runs its attitude controller. Ask
 it for a pitch it cannot reach and it drives one motor up and the opposite one
-down, harder and harder, until the low side is barely turning or has stopped.
-A stopped propeller is obvious; four spinning ones are not, which is why this
-looks for the slow motor rather than the fast one.
+down until the losing one stops outright. A stopped propeller is obvious;
+which of four spinning ones is slightly slower is not, so this drives one to a
+standstill rather than asking anyone to compare speeds.
+
+The angle demanded is worked out from the response, not guessed. Base thrust
+stays put: brushed motors need more duty to break away from rest than to keep
+turning, so lowering it to stop one motor stops all four instead.
 
 The Crazyflie 1.0 flies in "+" configuration: one motor at the front, one at
 the back, one each side. Pitch is the front motor against the back one, and
@@ -43,13 +47,17 @@ PROBE_PITCH = 20.0       # degrees; deliberately unreachable, to saturate output
 PHASE_SECONDS = 0.8
 CYCLES = 3
 HOLD_SECONDS = 4.0       # steady lean, long enough to watch the props
-DEFAULT_THRUST = 15000   # low enough that the losing motor reaches zero
+DEFAULT_THRUST = 15000   # high enough that every motor reliably starts
 MIN_CORRELATION = 0.5
 
-# The losing motor floors at (thrust - differential), so when it is still
-# spinning the shortfall is exactly how much the base thrust has to come down.
-STOP_MARGIN = 600        # aim a little past zero, not exactly at it
-MIN_SPIN_THRUST = 4000   # below this the winning motors stop too
+# The losing motor floors at (thrust - differential). Getting it to zero by
+# lowering the base thrust starves every motor at once: brushed motors need
+# more duty to break away from rest than to keep turning, so below roughly
+# 10000 none of them start and there is nothing to watch. Raise the commanded
+# angle instead -- the differential grows with the error, so the losing motor
+# reaches zero while the others merely spin faster.
+PITCH_MARGIN = 1.3       # overshoot the angle that would just reach zero
+MAX_PROBE_PITCH = 70.0   # beyond this the firmware clamps the setpoint anyway
 MAX_ATTEMPTS = 3
 
 MOTORS = ("motor.m1", "motor.m2", "motor.m3", "motor.m4")
@@ -174,35 +182,43 @@ def main() -> None:
         print("\nStep 2: identifying the two pitch arms.")
         print("Answers are relative to the drone's own front, as you know it.\n")
 
-        seen = {}
-        thrust = args.thrust
-        for label, pitch, motor in ((f"{args.pitch:+.0f}", +args.pitch, low_on_plus),
-                                    (f"{-args.pitch:+.0f}", -args.pitch, low_on_minus)):
-            print(f"  Holding {label} deg for {HOLD_SECONDS:.0f}s -- watch for "
-                  f"the propeller that STOPS.")
-            input("  Press Enter when ready: ")
+        # Step 1 already showed how far the differential moves per degree, so
+        # start from an angle predicted to bottom the motor out rather than
+        # from the probing angle, which demonstrably does not.
+        step1_reach = args.thrust - min(report[low_on_plus]["low"],
+                                        report[low_on_minus]["low"])
+        scale = args.thrust / max(1.0, step1_reach)
+        hold_pitch = min(MAX_PROBE_PITCH, args.pitch * scale * PITCH_MARGIN)
+        print(f"Step 1 moved the motors {step1_reach:.0f} of the {args.thrust} "
+              f"needed to reach zero,\nso holding {hold_pitch:.0f} deg rather "
+              f"than {args.pitch:.0f}. Base thrust stays at {args.thrust} so "
+              f"every\nmotor keeps turning; only the losing one should stop.\n")
 
+        seen = {}
+        for sign, motor in ((+1.0, low_on_plus), (-1.0, low_on_minus)):
+            pitch = sign * hold_pitch
             for attempt in range(MAX_ATTEMPTS):
-                _c, held = drive(scf, thrust, [(pitch, HOLD_SECONDS)])
+                print(f"  Holding {pitch:+.0f} deg for {HOLD_SECONDS:.0f}s -- "
+                      f"watch for the propeller that STOPS.")
+                input("  Press Enter when ready: ")
+                _c, held = drive(scf, args.thrust, [(pitch, HOLD_SECONDS)])
                 floor = min((v for _t, v in held[motor]), default=0.0)
                 if floor <= 0:
                     print(f"  ({motor} reached zero -- that propeller stopped.)")
                     break
 
-                # floor = thrust - differential, so dropping the base thrust by
-                # the floor is exactly what puts the losing motor on the stop.
-                lowered = int(thrust - floor - STOP_MARGIN)
-                if lowered < MIN_SPIN_THRUST or attempt == MAX_ATTEMPTS - 1:
+                harder = min(MAX_PROBE_PITCH,
+                             abs(pitch) * args.thrust / max(1.0, args.thrust - floor)
+                             * PITCH_MARGIN)
+                if harder <= abs(pitch) * 1.05 or attempt == MAX_ATTEMPTS - 1:
                     print(f"  ({motor} bottomed out at {floor:.0f} and will not "
-                          f"stop without\n   the other motors quitting too. "
-                          f"Watch for the slowest instead.)")
+                          f"reach zero.\n   Watch for the slowest propeller "
+                          f"instead.)")
                     break
 
                 print(f"  ({motor} only reached {floor:.0f}, still spinning. "
-                      f"Lowering thrust\n   to {lowered} and repeating -- watch "
-                      f"again.)")
-                thrust = lowered
-                input("  Press Enter when ready: ")
+                      f"Demanding\n   {harder:.0f} deg instead -- watch again.)")
+                pitch = sign * harder
 
             answer = input("  Which arm stopped?  [f] front  [b] back  "
                            "[l] left  [r] right: ").strip().lower()[:1]
