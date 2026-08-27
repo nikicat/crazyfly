@@ -16,8 +16,13 @@ the back, one each side. Pitch is the front motor against the back one, and
 roll is the other pair, so exactly two motors should respond here. Which two
 tells us which pair is the pitch axis; which of them slows tells us the sign.
 
-  * the motor that slows lets its side drop
-  * a dropping front means nose-down, which flies forward
+  * the motor that stops lets its side drop
+  * the drone then accelerates toward that side
+
+Which arm that turns out to be is a fact about how the IMU is mounted, not
+about the paint on the frame. If it is the left or right arm, then what cflib
+calls pitch moves this drone sideways, and a front-back drift is a roll
+problem -- worth knowing before trimming the wrong axis.
 
 SAFETY: the propellers spin. Put the drone on a flat surface, hands clear. It
 cannot lift at this thrust but it may skitter, so hold it by the battery.
@@ -157,12 +162,11 @@ def main() -> None:
         low_on_minus = max(pitch_pair, key=lambda m: report[m]["gain"])
 
         # Step 2: stop each end of the axis in turn. Which propeller STOPS is
-        # something you can actually see; which is merely slower is not. The
-        # positions are relative to where you are standing, so nothing depends
-        # on a marking being right -- and asking twice cross-checks the answer.
+        # something you can actually see; which is merely slower is not.
+        # Asking about both ends cross-checks the answer, since the pitch pair
+        # must sit across the frame from one another.
         print("\nStep 2: identifying the two pitch arms.")
-        print("Leave the drone exactly where it is and do not turn it between\n"
-              "the two runs. Answer relative to YOU.\n")
+        print("Answers are relative to the drone's own front, as you know it.\n")
 
         seen = {}
         for label, pitch, motor in ((f"{args.pitch:+.0f}", +args.pitch, low_on_plus),
@@ -172,46 +176,65 @@ def main() -> None:
             input("  Press Enter when ready: ")
             _c, held = drive(scf, args.thrust, [(pitch, HOLD_SECONDS)])
             floor = min((v for _t, v in held[motor]), default=None)
-            if floor is not None:
-                if floor > 0:
-                    print(f"  ({motor} bottomed out at {floor:.0f}, so it slowed "
-                          f"but never stopped.\n"
-                          f"   If you could not tell, Ctrl-C and retry with "
-                          f"--thrust {max(8000, args.thrust - 4000)}.)")
-                else:
-                    print(f"  ({motor} reached zero, so that propeller stopped.)")
-            answer = input("  Which arm stopped?  [n] nearest you  [f] furthest  "
+            if floor is not None and floor > 0:
+                print(f"  ({motor} bottomed out at {floor:.0f}, so it slowed but "
+                      f"never stopped.\n"
+                      f"   If you could not tell, Ctrl-C and retry with "
+                      f"--thrust {max(8000, args.thrust - 4000)}.)")
+            answer = input("  Which arm stopped?  [f] front  [b] back  "
                            "[l] left  [r] right: ").strip().lower()[:1]
-            if answer not in ("n", "f", "l", "r"):
+            if answer not in ("f", "b", "l", "r"):
                 print("\n  Not a recognised answer. Re-run and watch again.")
                 return
             seen[motor] = answer
             print()
 
-        names = {"n": "NEAREST you", "f": "FURTHEST from you",
-                 "l": "on your LEFT", "r": "on your RIGHT"}
-        for motor, where in seen.items():
-            print(f"  {motor} is the arm {names[where]}")
-
-        opposites = {"n": "f", "f": "n", "l": "r", "r": "l"}
+        names = {"f": "FRONT", "b": "BACK", "l": "LEFT", "r": "RIGHT"}
+        opposites = {"f": "b", "b": "f", "l": "r", "r": "l"}
         first, second = seen[low_on_plus], seen[low_on_minus]
+
+        for motor, where in seen.items():
+            print(f"  {motor} is the {names[where]} arm")
+
         if opposites[first] != second:
-            print("\nThose two arms are not opposite each other, so one of the\n"
-                  "readings was misread -- the pitch pair must sit across the\n"
-                  "frame from one another. Run it again and watch carefully.")
+            print("\nThose two arms are not opposite each other, and the pitch\n"
+                  "pair has to sit across the frame. One reading was misread --\n"
+                  "run it again and watch for the propeller that stops.")
             return
 
         print("\nConsistent: the two arms are opposite, as the pitch axis must be.")
-        print(f"\nA positive pitch command drops the arm {names[first]},\n"
-              f"so the drone accelerates that way.")
-        print(f"A negative pitch command drops the arm {names[second]}.")
 
-        print("\nSo, standing where you are now:")
-        print(f"  positive pitch trim  ->  drone moves {names[first]}")
-        print(f"  negative pitch trim  ->  drone moves {names[second]}")
-        print("\nWhichever of those two directions you have been calling "
-              "'backward',\ntell me and I will set hoptest's correction from "
-              "this measurement.")
+        # Whichever arm drops on a positive pitch command is the direction a
+        # positive command sends the drone. That is the whole answer; whether
+        # it matches the arm you call the front is a separate question.
+        print(f"\n  positive pitch  ->  drops the {names[first]} arm  ->  "
+              f"drone accelerates {names[first]}")
+        print(f"  negative pitch  ->  drops the {names[second]} arm  ->  "
+              f"drone accelerates {names[second]}")
+
+        if first in ("l", "r"):
+            print(f"\nSo what cflib calls pitch moves this drone along its\n"
+                  f"{names[first]}-{names[second]} axis, not front-back. The IMU is\n"
+                  f"mounted 90 degrees from the arm you call the front, which is\n"
+                  f"normal -- the frame is symmetric and the firmware picks the\n"
+                  f"axis, not the paint.\n")
+            print("Two consequences worth knowing:")
+            print(f"  * fly with the {names[first]} arm leading and the controls\n"
+                  f"    behave conventionally, pitch forward and roll sideways")
+            print("  * a drift along your front-back axis is a ROLL problem on\n"
+                  "    this drone, so pitch trim was never going to fix it")
+            print("\nThat would explain trimming pitch making no difference.")
+        else:
+            forward = "f" if first == "f" else "b"
+            print(f"\nSo a positive pitch command flies the drone {names[forward]}.")
+            if first == "f":
+                print("A backward drift is corrected by INCREASING pitch trim.")
+                print('\n  hoptest CORRECTIONS should read  "b": ("pitch", +1)')
+            else:
+                print("A backward drift is corrected by DECREASING pitch trim.")
+                print('\n  hoptest CORRECTIONS should read  "b": ("pitch", -1)')
+
+        print("\nTell me the result and I will set it from this measurement.")
 
 
 if __name__ == "__main__":
