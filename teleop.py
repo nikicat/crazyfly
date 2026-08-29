@@ -1,25 +1,10 @@
 #!/usr/bin/env python3
-"""Manual keyboard flight.
+"""Manual keyboard or gamepad flight.
 
 Sends raw roll/pitch/yaw/thrust setpoints, so it needs no positioning deck --
 but it also means nothing holds the drone up except you. Fly over a clear
-area, keep a hand near ESC, and start with small thrust.
-
-  w / s     thrust up / down          arrows    roll and pitch
-  a / d     yaw left / right          space     cut thrust to zero
-  ESC / q   land and quit
-
-  [ / ]     trim roll  left / right   ; / '     trim pitch fwd / back
-  0         reset trim to zero
-
-With --gamepad (Xbox controller on /dev/input/js0):
-
-  left stick    up = thrust, centre = motors off
-  right stick   roll and pitch, proportional     B        cut thrust to zero
-  LT / RT       yaw left / right, proportional
-  D-pad         trim roll / pitch                View     reset trim
-  Menu          land and quit
-  keyboard      q / ESC / space still work
+area, keep a hand near ESC, and start with small thrust. The controls are in
+KEYBOARD_HELP and GAMEPAD_HELP below; the one in use is printed at start.
 
 Trim is a constant offset added to every setpoint, to cancel a steady drift.
 Adjust it in the air a notch at a time; it is saved to trim.json on exit and
@@ -32,8 +17,10 @@ they are being held, which keeps a dropped keypress from latching a roll.
 """
 from __future__ import annotations
 
+import sys
 import time
 from contextlib import nullcontext
+from pathlib import Path
 
 import typer
 
@@ -41,6 +28,7 @@ import cfenv
 from flight import (
     DECAY,
     DT,
+    JS_DEVICE,
     MAX_ANGLE,
     MAX_THRUST,
     MAX_YAW_RATE,
@@ -59,6 +47,15 @@ from flight import (
 )
 
 TRIM_STEP = 0.2          # degrees per keypress, live in the air
+
+KEYBOARD_HELP = """\
+  w / s     thrust up / down     arrows   roll and pitch     a / d   yaw
+  space     cut thrust           [ ] ; '  trim roll / pitch  0       reset trim
+  ESC / q   land and quit"""
+GAMEPAD_HELP = """\
+  left stick   thrust (centre = off)   right stick   roll and pitch    LT / RT  yaw
+  B            cut thrust              D-pad         trim roll / pitch  View     reset trim
+  Menu / q     land and quit"""
 QUIT_KEYS = {"q", "ESC"}  # the gamepad's Menu button arrives as "q"
 
 
@@ -78,7 +75,7 @@ def wait_for_link(uri: str, inp, interrupt: Interruptible):
     stays responsive to q / Menu / Ctrl-C between attempts. Used both at start
     and after the drone drops off the air mid-flight.
     """
-    print(f"Connecting to {uri} ...", flush=True)
+    print(f"Connecting to {uri} ...", end="", flush=True)
     waiting = False
     while not interrupt.requested:
         if QUIT_KEYS & set(inp.poll()):
@@ -88,14 +85,14 @@ def wait_for_link(uri: str, inp, interrupt: Interruptible):
             scf.open_link()
         except (cfenv.ConnectTimeout, cfenv.LinkLost):
             if not waiting:
-                print("No answer -- switch the drone on. q, Menu or Ctrl-C gives up.",
-                      flush=True)
+                print(" no answer. Switch the drone on; q or Ctrl-C gives up.",
+                      end="", flush=True)
                 waiting = True
             time.sleep(1.0)
             continue
-        print("Connected.", flush=True)
+        print(" connected.", flush=True)
         return scf
-    print("Gave up waiting.", flush=True)
+    print(" gave up.", flush=True)
     return None
 
 
@@ -111,12 +108,15 @@ def run(
     roll_trim = saved_roll if roll_trim is None else roll_trim
     pitch_trim = saved_pitch if pitch_trim is None else pitch_trim
 
+    if gamepad and not Path(JS_DEVICE).exists():
+        sys.exit(f"No gamepad at {JS_DEVICE}. Press the Xbox button to wake it, then retry.")
+
     cfenv.init()
     uri = cfenv.resolve_uri(uri)
 
-    print(__doc__)
-    print(f"Trim: roll {roll_trim:+.1f} deg, pitch {pitch_trim:+.1f} deg"
-          f"{' (loaded from trim.json)' if TRIM_FILE.exists() else ''}")
+    print(GAMEPAD_HELP if gamepad else KEYBOARD_HELP)
+    print(f"Trim: roll {roll_trim:+.1f}, pitch {pitch_trim:+.1f} deg"
+          f"{' (trim.json)' if TRIM_FILE.exists() else ''}")
 
     # Input and Ctrl-C handling outlive any one connection: whether the drone
     # is off at start or drops off the air mid-flight, the loop below waits
@@ -128,7 +128,6 @@ def run(
         scf = wait_for_link(uri, inp, interrupt)
         while scf is not None:
             cf = scf.cf
-            print("Ready. Motors are armed once you raise thrust.\n")
 
             thrust = 0.0
             roll = pitch = yaw_rate = 0.0
@@ -216,10 +215,9 @@ def run(
                         vbat = battery[-1]["pm.vbat"] if battery else None
                         bat = ("?" if vbat is None else
                                f"{vbat:.2f}V{' LOW' if vbat < VBAT_CRITICAL else ''}")
-                        print(f"\r thrust {int(thrust):>6} |{bar:<20}| "
-                              f"roll {roll:>+6.1f} pitch {pitch:>+6.1f} yaw {yaw_rate:>+6.1f} "
-                              f"| trim r{roll_trim:>+5.1f} p{pitch_trim:>+5.1f} "
-                              f"| bat {bat:<9}",
+                        print(f"\r{int(thrust):>6} {bar:<20} "
+                              f"roll {roll:+5.1f} pitch {pitch:+5.1f} yaw {yaw_rate:+6.1f}  "
+                              f"trim {roll_trim:+.1f}/{pitch_trim:+.1f}  bat {bat:<9}",
                               end="", flush=True)
 
                         time.sleep(max(0.0, DT - (time.time() - loop_start)))
@@ -247,8 +245,7 @@ def run(
 
     if (roll_trim, pitch_trim) != (saved_roll, saved_pitch):
         save_trim(roll_trim, pitch_trim)
-        print(f"Trim saved to {TRIM_FILE.name}: "
-              f"roll {roll_trim:+.1f}, pitch {pitch_trim:+.1f}")
+        print(f"Trim saved: roll {roll_trim:+.1f}, pitch {pitch_trim:+.1f}")
 
 
 if __name__ == "__main__":
