@@ -105,8 +105,12 @@ def run(
                     if gamepad:
                         # Sticks spring back on their own, so no decay. The
                         # left stick is a throttle: centre is motors off,
-                        # thrust grows with how far up it is pushed.
-                        thrust = MAX_THRUST * max(0.0, inp.axis("thrust"))
+                        # thrust grows with how far up it is pushed. It
+                        # follows the stick up at once but comes down no
+                        # faster than the landing ramp, so letting go is a
+                        # descent rather than a drop.
+                        target = MAX_THRUST * max(0.0, inp.axis("thrust"))
+                        thrust = max(target, thrust - THRUST_STEP)
                         thrust = 0.0 if thrust < MIN_THRUST else thrust
                         roll = MAX_ANGLE * inp.axis("roll")
                         pitch = MAX_ANGLE * inp.axis("pitch")

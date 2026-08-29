@@ -128,7 +128,9 @@ Menu          land and quit
 The sticks are proportional, so a small nudge is a small lean, and the spring
 returns each axis to neutral -- no decay needed. The left stick is a throttle:
 centre is motors off and thrust grows linearly with how far up it is pushed, so
-hover sits around four fifths of the travel. Losing the controller
+hover sits around four fifths of the travel. It follows the stick up at once
+but comes down at the landing ramp's rate, so letting go is a descent, not a
+drop. Losing the controller
 mid-flight (Bluetooth drop, flat battery) lands the drone through the normal
 ramp. `flight.py` reads the joystick with the stdlib, no evdev or pygame; the
 axis and button numbers there were measured on an Xbox Series controller over
