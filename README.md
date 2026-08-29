@@ -145,7 +145,7 @@ uv run teleop.py
 ```
 w / s     thrust up / down          arrows    roll and pitch
 a / d     yaw left / right          space     cut thrust to zero
-ESC / q   land and quit
+h         height hold on / off      ESC / q   land and quit
 ```
 
 Or with an Xbox controller paired over Bluetooth (`/dev/input/js0`):
@@ -159,7 +159,7 @@ left stick    up = thrust, centre = motors off
 right stick   roll and pitch, proportional     B        cut thrust to zero
 LT / RT       yaw left / right, proportional
 D-pad         trim roll / pitch                View     reset trim
-Menu          land and quit
+A             height hold on / off             Menu     land and quit
 keyboard      q / ESC / space still work
 ```
 
@@ -174,8 +174,25 @@ ramp. `flight.py` reads the joystick with the stdlib, no evdev or pygame; the
 axis and button numbers there were measured on an Xbox Series controller over
 Bluetooth and differ from USB `xpad`, so remeasure before flying a different pad.
 
-The 1.0 has no positioning sensors, so **nothing holds it up but you.** Fly
-over a clear area and start with small thrust.
+### Height hold
+
+Once airborne, `h` (or A on the pad) hands height to the barometer: teleop
+sets `flightmode.althold`, and from then on the thrust stick is a climb rate
+-- centre holds, up climbs, down sinks, full scale 1 m/s -- while the firmware
+makes thrust itself from a vertical-speed PID around `posCtlPid.thrustBase`.
+Teleop sets that base to the thrust you were hovering at when you engaged,
+the best hover estimate there is, battery sag included. Toggling again,
+`space`, or landing hands thrust back at that same value. The status line
+shows `HOLD` and the height since connecting, from `posEstimatorAlt.estimatedZ`.
+
+Hold is refused on the ground on purpose: with the flag set, even a zero
+setpoint spins the motors at the firmware's `thrustMin`. For the same reason
+teleop clears it right after every connect -- it survives a link loss.
+Barometric hold wanders with pressure: doors, windows and heating move it by
+decimetres, so expect "drifts slowly" rather than "pinned".
+
+The 1.0 has nothing that senses the horizontal plane, so **nothing holds it in
+place but you.** Fly over a clear area and start with small thrust.
 
 Safety measures in the loop: thrust is capped at 50000 of 65535, ramps down on
 exit rather than cutting, and attitude inputs decay to neutral when you release

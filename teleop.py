@@ -51,12 +51,22 @@ TRIM_STEP = 0.2          # degrees per keypress, live in the air
 KEYBOARD_HELP = """\
   w / s     thrust up / down     arrows   roll and pitch     a / d   yaw
   space     cut thrust           [ ] ; '  trim roll / pitch  0       reset trim
-  ESC / q   land and quit"""
+  h         height hold on/off (then w / s climb / sink)    ESC / q  land and quit"""
 GAMEPAD_HELP = """\
   left stick   thrust (centre = off)   right stick   roll and pitch    LT / RT  yaw
   B            cut thrust              D-pad         trim roll / pitch  View     reset trim
-  Menu / q     land and quit"""
+  A            height hold on/off (then left stick climbs / sinks)   Menu / q  land and quit"""
 QUIT_KEYS = {"q", "ESC"}  # the gamepad's Menu button arrives as "q"
+
+# Height hold, firmware 2017.06: with flightmode.althold set the thrust word is
+# a climb rate instead -- HOLD_CENTRE holds, full scale is 1 m/s either way --
+# and the firmware makes thrust itself as vzPID * 1000 + posCtlPid.thrustBase.
+ALTHOLD = "flightmode.althold"
+THRUST_BASE = "posCtlPid.thrustBase"
+HOLD_CENTRE = 32767
+HOLD_SPAN = 32767
+Z_LOG = "posEstimatorAlt.estimatedZ"
+KEY_CLIMB = 0.5          # fraction of the full climb rate while w / s is held
 
 
 def held_axis(inp: Keyboard, neg: str, pos: str, current: float, full: float) -> float:
@@ -128,10 +138,24 @@ def run(
         scf = wait_for_link(uri, inp, interrupt)
         while scf is not None:
             cf = scf.cf
+            scf.wait_for_params()
+            has_hold = "flightmode" in cf.param.toc.toc
 
             thrust = 0.0
-            roll = pitch = yaw_rate = 0.0
-            link_lost = False
+            roll = pitch = yaw_rate = climb = 0.0
+            link_lost = hold = False
+
+            def set_hold(on: bool, cf=cf) -> None:      # cf bound per connection
+                nonlocal hold
+                cf.param.set_value(ALTHOLD, "1" if on else "0")
+                hold = on
+
+            # Height hold survives a link loss but not a reboot, and with it
+            # on even a zero setpoint spins the motors at the firmware's
+            # thrustMin. Clear it before the first setpoint goes out.
+            if has_hold:
+                set_hold(False)
+                time.sleep(0.2)
 
             # A zero setpoint unlocks the commander; the firmware refuses thrust
             # until it has seen one.
@@ -139,7 +163,10 @@ def run(
 
             # Battery voltage rides along at 2 Hz: one small log packet every
             # half second costs the 250K link nothing next to 33 setpoints/s.
-            with cfenv.record_log(scf, {"pm.vbat": "float"}, period_ms=500) as battery:
+            variables = {"pm.vbat": "float"}
+            if has_hold:
+                variables[Z_LOG] = "float"
+            with cfenv.record_log(scf, variables, period_ms=500) as battery:
                 try:
                     while True:
                         loop_start = time.time()
@@ -161,7 +188,22 @@ def run(
                             thrust = 0.0
                             link_lost = True
                             break
+                        if "h" in events:
+                            if hold:
+                                set_hold(False)
+                            elif not has_hold:
+                                print("\nThis firmware has no height hold.", flush=True)
+                            elif thrust > MIN_THRUST:
+                                # The thrust you hover at is the best hover
+                                # estimate there is, battery sag included; the
+                                # firmware's I term trims the rest.
+                                cf.param.set_value(THRUST_BASE, str(int(thrust)))
+                                set_hold(True)
+                            else:
+                                print("\nTake off first, then hold.", flush=True)
                         if " " in events:
+                            if hold:
+                                set_hold(False)
                             thrust = 0.0
 
                         if gamepad:
@@ -171,14 +213,20 @@ def run(
                             # It follows the stick up at once but comes down
                             # no faster than the landing ramp, so letting go
                             # is a descent rather than a drop.
-                            target = MAX_THRUST * max(0.0, inp.axis("thrust"))
-                            thrust = max(target, thrust - THRUST_STEP)
+                            climb = inp.axis("thrust")
+                            if not hold:    # holding: manual thrust waits for release
+                                target = MAX_THRUST * max(0.0, climb)
+                                thrust = max(target, thrust - THRUST_STEP)
                             roll = MAX_ANGLE * inp.axis("roll")
                             pitch = MAX_ANGLE * inp.axis("pitch")
                             yaw_rate = MAX_YAW_RATE * (inp.trigger("yaw_right")
                                                        - inp.trigger("yaw_left"))
                         else:
-                            if inp.down("w"):
+                            climb = (KEY_CLIMB if inp.down("w")
+                                     else -KEY_CLIMB if inp.down("s") else 0.0)
+                            if hold:
+                                pass        # manual thrust waits for release
+                            elif inp.down("w"):
                                 thrust = clamp(thrust + THRUST_STEP, MIN_THRUST, MAX_THRUST)
                             elif inp.down("s"):
                                 thrust -= THRUST_STEP
@@ -208,16 +256,22 @@ def run(
                             elif key == "0":
                                 roll_trim = pitch_trim = 0.0
 
+                        word = HOLD_CENTRE + HOLD_SPAN * climb if hold else thrust
                         cf.commander.send_setpoint(roll + roll_trim, pitch + pitch_trim,
-                                                   yaw_rate, int(thrust))
+                                                   yaw_rate, int(word))
 
                         bar = "#" * int(20 * thrust / MAX_THRUST)
                         vbat = battery[-1]["pm.vbat"] if battery else None
                         bat = ("?" if vbat is None else
                                f"{vbat:.2f}V{' LOW' if vbat < VBAT_CRITICAL else ''}")
+                        z = ""
+                        if has_hold and battery:
+                            z = f"z {battery[-1][Z_LOG] - battery[0][Z_LOG]:+.2f}m"
+                        mode = f"HOLD {climb:+.1f}" if hold else ""
                         print(f"\r{int(thrust):>6} {bar:<20} "
                               f"roll {roll:+5.1f} pitch {pitch:+5.1f} yaw {yaw_rate:+6.1f}  "
-                              f"trim {roll_trim:+.1f}/{pitch_trim:+.1f}  bat {bat:<9}",
+                              f"trim {roll_trim:+.1f}/{pitch_trim:+.1f}  bat {bat:<9} "
+                              f"{z:<9} {mode:<9}",
                               end="", flush=True)
 
                         time.sleep(max(0.0, DT - (time.time() - loop_start)))
@@ -227,6 +281,9 @@ def run(
                     # during this descent and would drift without it.
                     # stop_motors then finishes the job, and ignores Ctrl-C so
                     # it cannot be left half done.
+                    if hold and not link_lost:
+                        set_hold(False)     # the ramp below sends thrust, not climb rate
+                        time.sleep(0.2)
                     try:
                         while thrust > MIN_THRUST:
                             thrust = max(MIN_THRUST, thrust - THRUST_STEP)
