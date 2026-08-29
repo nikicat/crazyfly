@@ -77,7 +77,21 @@ uv run cf.py hop --thrust 42000 --reset-trim
 Each command is the `run()` of the module beside it, so the options are
 identical either way and `uv run hoptest.py --thrust 42000` still works.
 
-| command ### Flying
+| command | module | what it does |
+|---|---|---|
+| `scan` | `scan.py` | Sweep every channel and datarate for Crazyflies in range |
+| `link` | `linkcheck.py` | Low-level radio diagnostic. Needs no working firmware |
+| `boot` | `bootcheck.py` | Look for a Crazyflie sitting in bootloader mode |
+| `info` | `info.py` | Connect and report model, firmware, battery and attitude |
+| `teleop` | `teleop.py` | Manual keyboard flight, with persistent trim |
+| `hover` | `hover.py` | Autonomous takeoff, hover and land. Requires a Flow deck |
+| `trim` | `trimcheck.py` | Diagnose drift: gyro bias, sensor offset, or mechanical |
+| `hop` | `hoptest.py` | Bounded indoor hops that converge on a trim setting |
+| `orient` | `orient.py` | Work out which arm of the drone is the front, by tilting it |
+| `motors` | `motorcheck.py` | Find an axis's sign on the ground, by which motor stops |
+| `airborne` | `flightcheck.py` | Confirm the drone is airborne before trusting a trim result |
+
+### Flying
 
 ```fish
 uv run teleop.py
