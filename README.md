@@ -8,8 +8,8 @@ USB dongle.
 | Dongle | Crazyradio PA, USB `1915:7777`, firmware 0.5 |
 | Drone | Crazyflie 1.0 — STM32F103, 128 KB flash |
 | Link | `radio://0/40/250K`, address `E7E7E7E7E7` |
-| Firmware rev | `ba1d1111-12ad` |
-| Exposes | 27 parameters, 9 log variables |
+| Firmware | 2017.06 (was release 2013.4, kept in `firmware-backup.bin`) |
+| Exposes | 87 parameters, 96 log variables |
 
 ## The catch: stock cflib cannot connect to a Crazyflie 1.0
 
@@ -37,8 +37,18 @@ the Crazyflie 2.0. cflib requests the memory count during connection and
 retries forever when nothing answers, stalling before the parameter TOC is
 fetched. The patch reports zero memories for legacy firmware and moves on.
 
-Both patches check the protocol version, so a Crazyflie 2.x still behaves
-normally. They are applied in `cfenv.init()`, which every script calls.
+**3. Later 1.0 firmware says the magic word but cannot finish the sentence.**
+2017.06 -- the last release with 1.0 support -- answers the SOURCE request with
+`Bitcraze Crazyflie`, so cflib goes on to ask the PLATFORM port for a protocol
+version. That build compiles the platform service for the 2.0 only, so the
+question is never answered and `open_link()` blocks again, one step later. The
+version request now has a one-second deadline, after which the legacy path is
+taken; 2017.06 serves it fine (V1 table of contents, and it has no memory
+subsystem either, so patch 2 covers it too).
+
+All three patches check the protocol version or wait for an answer a 2.x gives
+in milliseconds, so a Crazyflie 2.x still behaves normally. They are applied in
+`cfenv.init()`, which every script calls.
 
 ## Setup
 
@@ -90,6 +100,7 @@ identical either way and `uv run hoptest.py --thrust 42000` still works.
 | `scan` | `scan.py` | Sweep every channel and datarate for Crazyflies in range |
 | `link` | `linkcheck.py` | Low-level radio diagnostic. Needs no working firmware |
 | `boot` | `bootcheck.py` | Look for a Crazyflie sitting in bootloader mode |
+| `flash` | `flash.py` | Back up the firmware over the radio, and flash a new one |
 | `info` | `info.py` | Connect and report model, firmware, battery and attitude |
 | `teleop` | `teleop.py` | Manual keyboard flight, with persistent trim |
 | `hover` | `hover.py` | Autonomous takeoff, hover and land. Requires a Flow deck |
@@ -98,6 +109,32 @@ identical either way and `uv run hoptest.py --thrust 42000` still works.
 | `orient` | `orient.py` | Work out which arm of the drone is the front, by tilting it |
 | `motors` | `motorcheck.py` | Find an axis's sign on the ground, by which motor stops |
 | `airborne` | `flightcheck.py` | Confirm the drone is airborne before trusting a trim result |
+
+### Firmware
+
+This board is the 10-DOF Crazyflie 1.0 -- the MS5611 barometer and HMC5883L
+magnetometer are fitted -- but it shipped with release 2013.4, which predates
+any use of them: no `baro.*` log group, no `flightmode.althold`. It now runs
+[2017.06](https://github.com/bitcraze/crazyflie-firmware/releases/tag/2017.06),
+the last release with 1.0 support, where `flightmode.althold = 1` turns the
+thrust stick into a vertical-speed setpoint, centre holding height on the
+barometer (`baro.asl`, filtered into `posEstimatorAlt.estimatedZ`, which sits
+still to about a centimetre on the bench).
+
+Flashing is over the radio, no USB. The 1.0's bootloader only runs for a
+moment at power-on, so start the tool first, then switch the drone on from its
+battery within 5 s:
+
+```fish
+uv run cf.py flash                              # backs up the current firmware
+uv run cf.py flash --firmware cf1-2017.06.bin   # backs up (if not yet), then flashes
+```
+
+`firmware-backup.bin` is every page after the bootloader, so
+`--firmware firmware-backup.bin` puts the original back. cflib's own
+`Bootloader.flash()` cannot be used here: it assumes a 2.x and looks up an
+nRF51 target the 1.0 does not have, so `flash.py` drives the page writer
+directly.
 
 ### Flying
 

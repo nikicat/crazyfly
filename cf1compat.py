@@ -16,9 +16,18 @@ below the >= 4 threshold in TocFetcher, so the TOC is fetched with the V1
 commands a Crazyflie 1.0 actually implements.
 
 The fix is to make the magic-string comparison tolerate non-UTF8 payloads.
+Later 1.0 firmware (2017.06, the last with 1.0 support) answers the magic
+string, so cflib goes on to ask the PLATFORM port for a protocol version -- but
+that build compiles the platform service for the 2.0 only, so the question is
+never answered and open_link() blocks again, one step later. So the version
+request gets a deadline: no answer within a second means the legacy path,
+which that firmware serves fine (V1 table of contents, no memory subsystem).
+
 Patched here rather than in site-packages so it survives reinstalling cflib.
 """
 from __future__ import annotations
+
+import threading
 
 from cflib.crazyflie.mem import Memory
 from cflib.crazyflie.platformservice import (
@@ -34,10 +43,24 @@ MAGIC = b'Bitcraze Crazyflie'
 _applied = False
 
 
+VERSION_TIMEOUT = 1.0    # seconds; a firmware that has the answer gives it in milliseconds
+
+
+def _finish_version(self, version: int) -> None:
+    """Record the protocol version and advance the connection, exactly once."""
+    with self._version_lock:
+        if self._version_done:
+            return
+        self._version_done = True
+    self._protocolVersion = version
+    self._callback()
+
+
 def _crt_service_callback(self, pk) -> None:
     if pk.channel != LINKSERVICE_SOURCE:
         return
-
+    self._version_lock = threading.Lock()
+    self._version_done = False
     # Compare as bytes. The original decodes to str first, which throws on the
     # arbitrary bytes a Crazyflie 1.0 returns here.
     if bytes(pk.data[:18]) == MAGIC:
@@ -45,10 +68,23 @@ def _crt_service_callback(self, pk) -> None:
         reply.set_header(CRTPPort.PLATFORM, VERSION_COMMAND)
         reply.data = (VERSION_GET_PROTOCOL,)
         self._cf.send_packet(reply)
+        # A 1.0 on 2017.06 never answers this: legacy path after a deadline.
+        timer = threading.Timer(VERSION_TIMEOUT, _finish_version, args=(self, -1))
+        timer.daemon = True
+        timer.start()
     else:
         # Pre-versioning firmware: -1 selects the V1 TOC and logging commands.
-        self._protocolVersion = -1
-        self._callback()
+        _finish_version(self, -1)
+
+
+_orig_platform_callback = PlatformService._platform_callback
+
+
+def _platform_callback(self, pk) -> None:
+    if pk.channel == VERSION_COMMAND and pk.data[0] == VERSION_GET_PROTOCOL:
+        _finish_version(self, pk.data[1])
+        return
+    _orig_platform_callback(self, pk)
 
 
 def _is_legacy(cf) -> bool:
@@ -90,5 +126,6 @@ def apply() -> None:
     global _applied
     if not _applied:
         PlatformService._crt_service_callback = _crt_service_callback
+        PlatformService._platform_callback = _platform_callback
         Memory.refresh = _mem_refresh
         _applied = True

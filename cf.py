@@ -16,6 +16,7 @@ import typer
 
 import bootcheck
 import cfenv
+import flash
 import flightcheck
 import hover
 import info
@@ -38,6 +39,7 @@ app = typer.Typer(
 app.command("scan", help=scan.run.__doc__)(scan.run)
 app.command("link", help=linkcheck.run.__doc__)(linkcheck.run)
 app.command("boot", help=bootcheck.run.__doc__)(bootcheck.run)
+app.command("flash", help=flash.run.__doc__)(flash.run)
 
 # --- looking at it --------------------------------------------------------
 app.command("info", help=info.run.__doc__)(info.run)
