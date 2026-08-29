@@ -102,6 +102,7 @@ identical either way and `uv run hoptest.py --thrust 42000` still works.
 | `boot` | `bootcheck.py` | Look for a Crazyflie sitting in bootloader mode |
 | `flash` | `flash.py` | Back up the firmware over the radio, and flash a new one |
 | `info` | `info.py` | Connect and report model, firmware, battery and attitude |
+| `mag` | `maglog.py` | Record the magnetometer to a CSV, with attitude, thrust and battery |
 | `teleop` | `teleop.py` | Manual keyboard flight, with persistent trim |
 | `hover` | `hover.py` | Autonomous takeoff, hover and land. Requires a Flow deck |
 | `trim` | `trimcheck.py` | Diagnose drift: gyro bias, sensor offset, or mechanical |

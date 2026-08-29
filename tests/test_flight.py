@@ -671,7 +671,7 @@ def test_router_exposes_every_tool():
     import cf
 
     registered = {command.name for command in cf.app.registered_commands}
-    expected = {"scan", "link", "boot", "flash", "info", "teleop", "hover",
+    expected = {"scan", "link", "boot", "flash", "info", "mag", "teleop", "hover",
                 "trim", "hop", "orient", "motors", "airborne"}
     assert expected <= registered
 

@@ -21,6 +21,7 @@ import flightcheck
 import hover
 import info
 import linkcheck
+import maglog
 import motorcheck
 import orient
 import scan
@@ -43,6 +44,7 @@ app.command("flash", help=flash.run.__doc__)(flash.run)
 
 # --- looking at it --------------------------------------------------------
 app.command("info", help=info.run.__doc__)(info.run)
+app.command("mag", help=maglog.run.__doc__)(maglog.run)
 
 # --- flying it ------------------------------------------------------------
 app.command("teleop", help=teleop.run.__doc__)(teleop.run)
