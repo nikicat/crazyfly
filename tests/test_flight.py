@@ -246,6 +246,24 @@ def test_unanswered_version_request_falls_back_to_legacy(monkeypatch):
     assert done == [3]
 
 
+# --- magnetic heading -----------------------------------------------------
+
+def test_heading_is_level_corrected_and_offset_free():
+    """Field straight ahead is 0, to the left is 90 (y points left), and
+    tilting the drone must not turn the heading once the field is levelled."""
+    import math
+
+    assert flight.heading(1, 0, 0, 0, 0) == 0
+    assert flight.heading(0, 1, 0, 0, 0) == 90
+    nose_up = 30
+    assert flight.heading(math.cos(math.radians(nose_up)), 0, -math.sin(math.radians(nose_up)),
+                          0, nose_up) == pytest.approx(0, abs=1e-6)
+    right_down = math.radians(20)
+    assert flight.heading(0, math.cos(right_down), -math.sin(right_down),
+                          20, 0) == pytest.approx(90, abs=1e-6)
+    assert flight.heading(1 + 1.7, -1.6, -0.3, 0, 0, offset=(1.7, -1.6, -0.3)) == 0
+
+
 # --- gamepad --------------------------------------------------------------
 
 def js_event(kind: int, number: int, value: int, initial: bool = False) -> bytes:

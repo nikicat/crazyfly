@@ -10,8 +10,9 @@ usable however the run ends.
 
 For a hard-iron calibration, turn the drone slowly through every orientation
 while it records; the offset per axis is then (min + max) / 2 from the summary
-printed at the end. Motor current bends the field too, which is why thrust is
-in the file: compare readings at rest and under power before trusting a heading.
+printed at the end, and --save keeps it in mag.json for teleop's heading.
+Motor current bends the field too, which is why thrust is in the file: compare
+readings at rest and under power before trusting a heading.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from pathlib import Path
 import typer
 
 import cfenv
+from flight import MAG_FILE, save_mag_offset
 
 # One CRTP log packet carries 26 bytes: the field as floats, the rest as FP16.
 VARIABLES = {
@@ -32,9 +34,11 @@ VARIABLES = {
     "stabilizer.thrust": "FP16", "pm.vbat": "FP16",
 }
 PERIOD_MS = 50
+MIN_SWING = 0.5          # gauss; a full turn swings each axis by about twice Earth's field
 
 
-def run(seconds: float = 30.0, out: Path = Path("mag.csv"), uri: str | None = None) -> None:
+def run(seconds: float = 30.0, out: Path = Path("mag.csv"), save: bool = False,
+        uri: str | None = None) -> None:
     """Record the magnetometer to a CSV, with attitude, thrust and battery."""
     cfenv.init()
     uri = cfenv.resolve_uri(uri)
@@ -68,6 +72,14 @@ def run(seconds: float = 30.0, out: Path = Path("mag.csv"), uri: str | None = No
                     say(f"  {axis}: min {min(values):+8.3f}  max {max(values):+8.3f}  "
                         f"mean {statistics.fmean(values):+8.3f}  "
                         f"hard-iron offset {(min(values) + max(values)) / 2:+8.3f}")
+            if save and count:
+                swing = min(max(v) - min(v) for v in field.values())
+                if swing < MIN_SWING:
+                    say(f"Not saved: an axis swung only {swing:.2f} G, so the drone was not "
+                        f"turned through every orientation. Need {MIN_SWING} G on each.")
+                else:
+                    save_mag_offset(*((min(v) + max(v)) / 2 for v in field.values()))
+                    say(f"Offset saved to {MAG_FILE.name}; teleop will show a heading.")
 
 
 if __name__ == "__main__":

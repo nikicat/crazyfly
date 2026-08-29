@@ -7,6 +7,7 @@ here -- that is cfenv -- so this stays importable and testable on its own.
 from __future__ import annotations
 
 import json
+import math
 import os
 import select
 import signal
@@ -37,6 +38,7 @@ HOLD = 0.12
 TRIM_LIMIT = 10.0        # refuse to trim past this; beyond it something is bent
 VBAT_CRITICAL = 3.4      # volts; land now. Full is ~4.2, sags a few tenths under load
 TRIM_FILE = Path(__file__).with_name("trim.json")
+MAG_FILE = Path(__file__).with_name("mag.json")    # hard-iron offset from `cf.py mag --save`
 
 JS_DEVICE = "/dev/input/js0"
 JS_DEADZONE = 0.15       # stick centre wobble below this reads as neutral
@@ -63,6 +65,36 @@ def load_trim() -> tuple[float, float]:
         return float(saved["roll"]), float(saved["pitch"])
     except (OSError, ValueError, KeyError):
         return 0.0, 0.0
+
+
+def load_mag_offset() -> tuple[float, float, float] | None:
+    try:
+        saved = json.loads(MAG_FILE.read_text())
+        return float(saved["x"]), float(saved["y"]), float(saved["z"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def save_mag_offset(x: float, y: float, z: float) -> None:
+    MAG_FILE.write_text(json.dumps({"x": round(x, 4), "y": round(y, 4), "z": round(z, 4)},
+                                   indent=2) + "\n")
+
+
+def heading(mx: float, my: float, mz: float, roll: float, pitch: float,
+            offset: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> float:
+    """Magnetic heading in degrees, 0..360, from the field levelled by attitude.
+
+    Body frame x forward, y left, z up; roll positive right wing down, pitch
+    positive nose up; zero is wherever the field points, not true north.
+    ponytail: the pitch sign is the firmware's to confirm; at teleop's 15 deg
+    a wrong sign costs a few degrees of heading, not the direction.
+    """
+    mx, my, mz = mx - offset[0], my - offset[1], mz - offset[2]
+    r, p = math.radians(roll), math.radians(pitch)
+    x1 = mx * math.cos(p) - mz * math.sin(p)          # undo pitch
+    z1 = mx * math.sin(p) + mz * math.cos(p)
+    y2 = my * math.cos(r) - z1 * math.sin(r)          # then roll
+    return math.degrees(math.atan2(y2, x1)) % 360
 
 
 def save_trim(roll: float, pitch: float) -> None:

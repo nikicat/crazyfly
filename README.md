@@ -192,6 +192,24 @@ teleop clears it right after every connect -- it survives a link loss.
 Barometric hold wanders with pressure: doors, windows and heating move it by
 decimetres, so expect "drifts slowly" rather than "pinned".
 
+### Heading
+
+The firmware reads the HMC5883L but never uses it -- yaw is the integrated
+gyro, which held to about 6 deg/min at rest here -- so the compass is a
+display, not a control. Calibrate once, turning the drone slowly through
+every orientation while it records:
+
+```fish
+uv run cf.py mag --seconds 60 --save     # writes mag.json, the hard-iron offset
+```
+
+The raw field is about four times Earth's, all offset from the battery and
+board, so without that file a heading is meaningless and teleop shows none.
+With it, the status line shows `hdg`, the field levelled by roll and pitch,
+zero wherever the field points rather than true north. Expect it to swing with
+throttle: motor current bends the field, which is what `cf.py mag` records
+thrust for.
+
 The 1.0 has nothing that senses the horizontal plane, so **nothing holds it in
 place but you.** Fly over a clear area and start with small thrust.
 

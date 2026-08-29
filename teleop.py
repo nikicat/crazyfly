@@ -41,6 +41,8 @@ from flight import (
     Interruptible,
     Keyboard,
     clamp,
+    heading,
+    load_mag_offset,
     load_trim,
     save_trim,
     stop_motors,
@@ -66,6 +68,8 @@ THRUST_BASE = "posCtlPid.thrustBase"
 HOLD_CENTRE = 32767
 HOLD_SPAN = 32767
 Z_LOG = "posEstimatorAlt.estimatedZ"
+MAG_LOGS = {"mag.x": "float", "mag.y": "float", "mag.z": "float",
+            "stabilizer.roll": "FP16", "stabilizer.pitch": "FP16"}
 KEY_CLIMB = 0.5          # fraction of the full climb rate while w / s is held
 
 
@@ -115,6 +119,7 @@ def run(
     """Manual keyboard or gamepad flight, with persistent trim."""
 
     saved_roll, saved_pitch = load_trim()
+    mag_offset = load_mag_offset()
     roll_trim = saved_roll if roll_trim is None else roll_trim
     pitch_trim = saved_pitch if pitch_trim is None else pitch_trim
 
@@ -140,6 +145,7 @@ def run(
             cf = scf.cf
             scf.wait_for_params()
             has_hold = "flightmode" in cf.param.toc.toc
+            has_mag = mag_offset is not None and "mag" in cf.log.toc.toc
 
             thrust = 0.0
             roll = pitch = yaw_rate = climb = 0.0
@@ -166,6 +172,8 @@ def run(
             variables = {"pm.vbat": "float"}
             if has_hold:
                 variables[Z_LOG] = "float"
+            if has_mag:
+                variables.update(MAG_LOGS)      # 24 of the packet's 26 bytes, all in
             with cfenv.record_log(scf, variables, period_ms=500) as battery:
                 try:
                     while True:
@@ -267,11 +275,18 @@ def run(
                         z = ""
                         if has_hold and battery:
                             z = f"z {battery[-1][Z_LOG] - battery[0][Z_LOG]:+.2f}m"
+                        hdg = ""
+                        if has_mag and battery:
+                            last = battery[-1]
+                            degrees = heading(last["mag.x"], last["mag.y"], last["mag.z"],
+                                              last["stabilizer.roll"], last["stabilizer.pitch"],
+                                              mag_offset)
+                            hdg = f"hdg {degrees:3.0f}"
                         mode = f"HOLD {climb:+.1f}" if hold else ""
                         print(f"\r{int(thrust):>6} {bar:<20} "
                               f"roll {roll:+5.1f} pitch {pitch:+5.1f} yaw {yaw_rate:+6.1f}  "
                               f"trim {roll_trim:+.1f}/{pitch_trim:+.1f}  bat {bat:<9} "
-                              f"{z:<9} {mode:<9}",
+                              f"{z:<9} {hdg:<8} {mode:<9}",
                               end="", flush=True)
 
                         time.sleep(max(0.0, DT - (time.time() - loop_start)))
