@@ -189,11 +189,17 @@ def test_teleop_up_arrow_flies_forward():
 
     import teleop
 
-    source = inspect.getsource(teleop.run)
-    up_index = source.index('inp.down("up")')
-    branch = source[up_index:up_index + 120]
-    assert "pitch = MAX_ANGLE" in branch
-    assert "pitch = -MAX_ANGLE" not in branch.split("elif")[0]
+    class Holding:
+        def __init__(self, *keys):
+            self.keys = set(keys)
+
+        def down(self, key):
+            return key in self.keys
+
+    assert teleop.held_axis(Holding("up"), "down", "up", 0.0, 15.0) == 15.0
+    assert teleop.held_axis(Holding("down"), "down", "up", 0.0, 15.0) == -15.0
+    assert teleop.held_axis(Holding(), "down", "up", 10.0, 15.0) == 10.0 * flight.DECAY
+    assert 'held_axis(inp, "down", "up", pitch, MAX_ANGLE)' in inspect.getsource(teleop.run)
 
 
 # --- gamepad --------------------------------------------------------------
@@ -210,7 +216,12 @@ def test_gamepad_maps_xbox_controls_to_teleop_keys(tmp_path):
     up reads positive: more thrust on the left, forward pitch on the right."""
     path = tmp_path / "js0"
     os.mkfifo(path)
-    with flight.Gamepad(str(path)) as pad:
+
+    class TypedQ:
+        def poll(self):
+            return ["q"]
+
+    with flight.Gamepad(str(path), keyboard=TypedQ()) as pad:
         writer = os.open(path, os.O_WRONLY)
         os.write(writer, b"".join([
             js_event(1, 1, 1, initial=True),     # state dump on open: not a press
@@ -226,7 +237,7 @@ def test_gamepad_maps_xbox_controls_to_teleop_keys(tmp_path):
         ]))
         events = pad.poll()
 
-        assert events == [" ", "q", "'"]
+        assert events == ["q", " ", "q", "'"]      # keyboard q first, then the pad
         assert pad.axis("thrust") == pytest.approx(1.0)
         assert 0.3 < pad.axis("pitch") < 0.5
         assert pad.axis("roll") == 0.0

@@ -123,6 +123,7 @@ right stick   roll and pitch, proportional     B        cut thrust to zero
 LT / RT       yaw left / right, proportional
 D-pad         trim roll / pitch                View     reset trim
 Menu          land and quit
+keyboard      q / ESC / space still work
 ```
 
 The sticks are proportional, so a small nudge is a small lean, and the spring
@@ -147,6 +148,13 @@ load, so land when it flags rather than when it recovers on the ground.
 
 The loop runs at 33 Hz because a 250K link cannot carry setpoints faster than
 about 35 Hz once each send blocks on its ack.
+
+Teleop waits for the drone rather than failing: if it is off at start, or
+drops off the air mid-flight -- flat battery, idle power-off, a reboot on USB
+-- cflib notices after a few seconds of lost acks, teleop reports it and
+retries the link every second or so instead of flying a ghost with a frozen
+status line. Switch the drone on and it carries on with the same trim; `q`,
+Menu or Ctrl-C gives up instead.
 
 **Ctrl-C lands the drone.** A `KeyboardInterrupt` raised at an arbitrary point
 would stop the setpoints with the motors still running, leaving nothing to cut

@@ -144,13 +144,15 @@ class Gamepad:
 
     Sticks come back from axis() as -1..1 with the spring doing the return to
     neutral, so there is nothing to decay. Buttons and the D-pad are one-shot
-    events named after the key they replace. A read failure means the pad is
+    events named after the key they replace, and a Keyboard passed in is polled
+    too, so its keys still quit or cut thrust. A read failure means the pad is
     gone -- Bluetooth dropped or battery flat -- and is raised so the flight
     loop lands rather than holding the last setpoint.
     """
 
-    def __init__(self, path: str = JS_DEVICE) -> None:
+    def __init__(self, path: str = JS_DEVICE, keyboard: Keyboard | None = None) -> None:
         self.path = path
+        self.keyboard = keyboard    # its keys keep working as a backstop: q, ESC, space
         self.fd = -1
         self.axes: dict[int, float] = {}
 
@@ -163,7 +165,7 @@ class Gamepad:
 
     def poll(self) -> list[str]:
         """Drain pending joystick events, return one-shot key-style events."""
-        events = []
+        events = self.keyboard.poll() if self.keyboard else []
         while select.select([self.fd], [], [], 0)[0]:
             chunk = os.read(self.fd, 8 * 64)
             if not chunk:
