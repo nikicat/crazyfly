@@ -46,6 +46,7 @@ from flight import (
     THRUST_STEP,
     TRIM_FILE,
     TRIM_LIMIT,
+    VBAT_CRITICAL,
     Gamepad,
     Interruptible,
     Keyboard,
@@ -88,7 +89,10 @@ def run(
         # until it has seen one.
         cf.commander.send_setpoint(0, 0, 0, 0)
 
-        with (Gamepad() if gamepad else Keyboard()) as inp, Interruptible() as interrupt:
+        # Battery voltage rides along at 2 Hz: one small log packet every
+        # half second costs the 250K link nothing next to 33 setpoints/s.
+        with cfenv.record_log(scf, {"pm.vbat": "float"}, period_ms=500) as battery, \
+                (Gamepad() if gamepad else Keyboard()) as inp, Interruptible() as interrupt:
             try:
                 while True:
                     loop_start = time.time()
@@ -166,9 +170,13 @@ def run(
                                                yaw_rate, int(thrust))
 
                     bar = "#" * int(20 * thrust / MAX_THRUST)
+                    vbat = battery[-1]["pm.vbat"] if battery else None
+                    bat = ("?" if vbat is None else
+                           f"{vbat:.2f}V{' LOW' if vbat < VBAT_CRITICAL else ''}")
                     print(f"\r thrust {int(thrust):>6} |{bar:<20}| "
                           f"roll {roll:>+6.1f} pitch {pitch:>+6.1f} yaw {yaw_rate:>+6.1f} "
-                          f"| trim r{roll_trim:>+5.1f} p{pitch_trim:>+5.1f} ",
+                          f"| trim r{roll_trim:>+5.1f} p{pitch_trim:>+5.1f} "
+                          f"| bat {bat:<9}",
                           end="", flush=True)
 
                     time.sleep(max(0.0, DT - (time.time() - loop_start)))

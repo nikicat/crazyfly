@@ -12,6 +12,7 @@ import statistics
 import typer
 
 import cfenv
+from flight import VBAT_CRITICAL
 
 
 def sample(scf, variables: dict[str, str], count: int = 5) -> dict[str, float]:
@@ -68,7 +69,7 @@ def run(uri: str | None = None) -> None:
         })
         vbat = readings["pm.vbat"]
         print(f"\nBattery       : {vbat:.2f} V")
-        if vbat < 3.4:
+        if vbat < VBAT_CRITICAL:
             print("                CRITICAL -- charge before doing anything else")
         elif vbat < 3.7:
             print("                LOW -- charge before flying (full is ~4.2 V)")

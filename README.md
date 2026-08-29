@@ -141,7 +141,9 @@ over a clear area and start with small thrust.
 
 Safety measures in the loop: thrust is capped at 50000 of 65535, ramps down on
 exit rather than cutting, and attitude inputs decay to neutral when you release
-a key so a dropped keypress cannot latch a roll.
+a key so a dropped keypress cannot latch a roll. The status line shows the
+battery voltage live and flags `LOW` under 3.4 V; it sags a few tenths under
+load, so land when it flags rather than when it recovers on the ground.
 
 The loop runs at 33 Hz because a 250K link cannot carry setpoints faster than
 about 35 Hz once each send blocks on its ack.

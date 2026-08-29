@@ -35,6 +35,7 @@ DECAY = 0.75             # attitude return-to-neutral per tick when idle
 HOLD = 0.12
 
 TRIM_LIMIT = 10.0        # refuse to trim past this; beyond it something is bent
+VBAT_CRITICAL = 3.4      # volts; land now. Full is ~4.2, sags a few tenths under load
 TRIM_FILE = Path(__file__).with_name("trim.json")
 
 JS_DEVICE = "/dev/input/js0"
