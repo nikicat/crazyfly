@@ -190,10 +190,52 @@ def test_teleop_up_arrow_flies_forward():
     import teleop
 
     source = inspect.getsource(teleop.run)
-    up_index = source.index('kb.down("up")')
+    up_index = source.index('inp.down("up")')
     branch = source[up_index:up_index + 120]
     assert "pitch = MAX_ANGLE" in branch
     assert "pitch = -MAX_ANGLE" not in branch.split("elif")[0]
+
+
+# --- gamepad --------------------------------------------------------------
+
+def js_event(kind: int, number: int, value: int, initial: bool = False) -> bytes:
+    """One Linux joystick event, as the kernel would write it."""
+    import struct
+
+    return struct.pack("IhBB", 0, value, kind | (0x80 if initial else 0), number)
+
+
+def test_gamepad_maps_xbox_controls_to_teleop_keys(tmp_path):
+    """B cuts thrust, Menu lands, the D-pad trims, and pushing either stick
+    up reads positive: more thrust on the left, forward pitch on the right."""
+    path = tmp_path / "js0"
+    os.mkfifo(path)
+    with flight.Gamepad(str(path)) as pad:
+        writer = os.open(path, os.O_WRONLY)
+        os.write(writer, b"".join([
+            js_event(1, 1, 1, initial=True),     # state dump on open: not a press
+            js_event(1, 1, 1),                   # B
+            js_event(1, 11, 1),                  # Menu
+            js_event(2, 7, -32767),              # D-pad up
+            js_event(2, 7, 0),                   # D-pad released: no event
+            js_event(2, 1, -32767),              # left stick full up
+            js_event(2, 3, -16000),              # right stick half up
+            js_event(2, 2, 2000),                # right stick X inside the deadzone
+            js_event(2, 5, -32767, initial=True),  # LT at rest
+            js_event(2, 4, 32767),               # RT fully pulled
+        ]))
+        events = pad.poll()
+
+        assert events == [" ", "q", "'"]
+        assert pad.axis("thrust") == pytest.approx(1.0)
+        assert 0.3 < pad.axis("pitch") < 0.5
+        assert pad.axis("roll") == 0.0
+        assert pad.trigger("yaw_left") == 0.0
+        assert pad.trigger("yaw_right") == pytest.approx(1.0)
+
+        os.close(writer)
+        with pytest.raises(OSError):
+            pad.poll()                           # writer gone == pad disconnected
 
 
 # --- trim persistence -----------------------------------------------------

@@ -7,8 +7,10 @@ here -- that is cfenv -- so this stays importable and testable on its own.
 from __future__ import annotations
 
 import json
+import os
 import select
 import signal
+import struct
 import sys
 import termios
 import time
@@ -34,6 +36,20 @@ HOLD = 0.12
 
 TRIM_LIMIT = 10.0        # refuse to trim past this; beyond it something is bent
 TRIM_FILE = Path(__file__).with_name("trim.json")
+
+JS_DEVICE = "/dev/input/js0"
+JS_DEADZONE = 0.15       # stick centre wobble below this reads as neutral
+
+# Joystick numbering measured on an Xbox Series controller over Bluetooth
+# (hid-microsoft). Plugged in over USB, xpad numbers the buttons differently --
+# remeasure with `cat /proc/bus/input/devices` and a js dump before trusting it.
+# Y axes read negative when pushed up, hence the sign on thrust and pitch.
+JS_AXES = {"thrust": (1, -1), "roll": (2, +1), "pitch": (3, -1)}
+JS_TRIGGERS = {"yaw_left": 5, "yaw_right": 4}   # LT / RT, analog, rest at -1
+# Buttons and D-pad emit the key they stand in for, so teleop handles both alike.
+JS_BUTTONS = {1: " ", 10: "0", 11: "q"}         # B cut thrust, View reset trim, Menu land
+JS_HATS = {(6, -1): "[", (6, +1): "]",          # D-pad left/right: roll trim
+           (7, -1): "'", (7, +1): ";"}          # D-pad up/down: pitch trim fwd/back
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -120,6 +136,62 @@ class Keyboard:
 
     def down(self, key: str) -> bool:
         return key in self.held
+
+
+class Gamepad:
+    """Linux joystick reader that speaks the same events as Keyboard.
+
+    Sticks come back from axis() as -1..1 with the spring doing the return to
+    neutral, so there is nothing to decay. Buttons and the D-pad are one-shot
+    events named after the key they replace. A read failure means the pad is
+    gone -- Bluetooth dropped or battery flat -- and is raised so the flight
+    loop lands rather than holding the last setpoint.
+    """
+
+    def __init__(self, path: str = JS_DEVICE) -> None:
+        self.path = path
+        self.fd = -1
+        self.axes: dict[int, float] = {}
+
+    def __enter__(self) -> Gamepad:
+        self.fd = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        os.close(self.fd)
+
+    def poll(self) -> list[str]:
+        """Drain pending joystick events, return one-shot key-style events."""
+        events = []
+        while select.select([self.fd], [], [], 0)[0]:
+            chunk = os.read(self.fd, 8 * 64)
+            if not chunk:
+                raise OSError("gamepad disconnected")
+            for _stamp, value, kind, number in struct.iter_unpack("IhBB", chunk):
+                initial = kind & 0x80        # state dump on open, not a press
+                key = None
+                if kind & 0x7F == 2:         # JS_EVENT_AXIS
+                    self.axes[number] = value / 32767
+                    key = JS_HATS.get((number, (value > 0) - (value < 0)))
+                elif kind & 0x7F == 1 and value:   # JS_EVENT_BUTTON, pressed
+                    key = JS_BUTTONS.get(number)
+                if key and not initial:
+                    events.append(key)
+        return events
+
+    def axis(self, name: str) -> float:
+        """Stick deflection in -1..1, zero inside the deadzone, then linear."""
+        number, sign = JS_AXES[name]
+        value = self.axes.get(number, 0.0)
+        if abs(value) < JS_DEADZONE:
+            return 0.0
+        scaled = (abs(value) - JS_DEADZONE) / (1.0 - JS_DEADZONE)
+        return sign * scaled * (1 if value > 0 else -1)
+
+    def trigger(self, name: str) -> float:
+        """Trigger pull in 0..1; the joystick API reports it as -1 at rest."""
+        pull = (self.axes.get(JS_TRIGGERS[name], -1.0) + 1.0) / 2.0
+        return 0.0 if pull < JS_DEADZONE else pull
 
 
 class Interruptible:

@@ -55,9 +55,17 @@ uv run ruff check .
 (numpy/scipy wheels) is not reliably built for 3.14 on aarch64 yet, so `uv`
 fetches 3.12 rather than using the system interpreter.
 
-USB permissions are in `/etc/udev/rules.d/99-bitcraze.rules`. Arch has no
-`plugdev` group, so the rules use `uucp` — which you are already in, so no
-re-login was needed — plus a `uaccess` tag for local logins. To undo:
+USB permissions come from `99-bitcraze.rules` in this repo. Arch has no
+`plugdev` group, so it hands the dongle to `uucp` — which you are already in —
+plus a `uaccess` tag for local logins. Install it once; the `trigger` applies
+it to a dongle that is already plugged in:
+
+```fish
+sudo install -m 644 99-bitcraze.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules; and sudo udevadm trigger --attr-match=idVendor=1915
+```
+
+Without it `cf.py` reports "Permission denied opening the Crazyradio". To undo:
 
 ```fish
 sudo rm /etc/udev/rules.d/99-bitcraze.rules; and sudo udevadm control --reload-rules
@@ -102,6 +110,29 @@ w / s     thrust up / down          arrows    roll and pitch
 a / d     yaw left / right          space     cut thrust to zero
 ESC / q   land and quit
 ```
+
+Or with an Xbox controller paired over Bluetooth (`/dev/input/js0`):
+
+```fish
+uv run teleop.py --gamepad
+```
+
+```
+left stick    up = thrust, centre = motors off
+right stick   roll and pitch, proportional     B        cut thrust to zero
+LT / RT       yaw left / right, proportional
+D-pad         trim roll / pitch                View     reset trim
+Menu          land and quit
+```
+
+The sticks are proportional, so a small nudge is a small lean, and the spring
+returns each axis to neutral -- no decay needed. The left stick is a throttle:
+centre is motors off and thrust grows linearly with how far up it is pushed, so
+hover sits around four fifths of the travel. Losing the controller
+mid-flight (Bluetooth drop, flat battery) lands the drone through the normal
+ramp. `flight.py` reads the joystick with the stdlib, no evdev or pygame; the
+axis and button numbers there were measured on an Xbox Series controller over
+Bluetooth and differ from USB `xpad`, so remeasure before flying a different pad.
 
 The 1.0 has no positioning sensors, so **nothing holds it up but you.** Fly
 over a clear area and start with small thrust.

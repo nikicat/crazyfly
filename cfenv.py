@@ -255,8 +255,11 @@ def run(entry) -> None:
         if err.errno == 16:      # EBUSY
             sys.exit(BUSY_MESSAGE)
         if err.errno == 13:      # EACCES
-            sys.exit("Permission denied opening the Crazyradio. The udev rule "
-                     "in\n/etc/udev/rules.d/99-bitcraze.rules may be missing.")
+            sys.exit("Permission denied opening the Crazyradio. Install the udev "
+                     "rule from this repo:\n"
+                     "  sudo install -m 644 99-bitcraze.rules /etc/udev/rules.d/\n"
+                     "  sudo udevadm control --reload-rules; "
+                     "and sudo udevadm trigger --attr-match=idVendor=1915")
         raise
     except KeyboardInterrupt:
         sys.exit("\nInterrupted.")

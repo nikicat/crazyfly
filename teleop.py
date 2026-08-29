@@ -12,6 +12,14 @@ area, keep a hand near ESC, and start with small thrust.
   [ / ]     trim roll  left / right   ; / '     trim pitch fwd / back
   0         reset trim to zero
 
+With --gamepad (Xbox controller on /dev/input/js0):
+
+  left stick    up = thrust, centre = motors off
+  right stick   roll and pitch, proportional     B        cut thrust to zero
+  LT / RT       yaw left / right, proportional
+  D-pad         trim roll / pitch                View     reset trim
+  Menu          land and quit
+
 Trim is a constant offset added to every setpoint, to cancel a steady drift.
 Adjust it in the air a notch at a time; it is saved to trim.json on exit and
 reloaded next run. Trim only cancels a *steady* drift -- if the drone accelerates
@@ -38,6 +46,7 @@ from flight import (
     THRUST_STEP,
     TRIM_FILE,
     TRIM_LIMIT,
+    Gamepad,
     Interruptible,
     Keyboard,
     clamp,
@@ -53,8 +62,9 @@ def run(
     roll_trim: float | None = None,
     pitch_trim: float | None = None,
     uri: str | None = None,
+    gamepad: bool = False,
 ) -> None:
-    """Manual keyboard flight, with persistent trim."""
+    """Manual keyboard or gamepad flight, with persistent trim."""
 
     saved_roll, saved_pitch = load_trim()
     roll_trim = saved_roll if roll_trim is None else roll_trim
@@ -78,46 +88,61 @@ def run(
         # until it has seen one.
         cf.commander.send_setpoint(0, 0, 0, 0)
 
-        with Keyboard() as kb, Interruptible() as interrupt:
+        with (Gamepad() if gamepad else Keyboard()) as inp, Interruptible() as interrupt:
             try:
                 while True:
                     loop_start = time.time()
-                    events = kb.poll()
+                    try:
+                        events = inp.poll()
+                    except OSError as err:
+                        print(f"\n{err} -- landing.", flush=True)
+                        break
                     if "ESC" in events or "q" in events or interrupt.requested:
                         break
                     if " " in events:
                         thrust = 0.0
 
-                    if kb.down("w"):
-                        thrust = clamp(thrust + THRUST_STEP, MIN_THRUST, MAX_THRUST)
-                    elif kb.down("s"):
-                        thrust = thrust - THRUST_STEP
+                    if gamepad:
+                        # Sticks spring back on their own, so no decay. The
+                        # left stick is a throttle: centre is motors off,
+                        # thrust grows with how far up it is pushed.
+                        thrust = MAX_THRUST * max(0.0, inp.axis("thrust"))
                         thrust = 0.0 if thrust < MIN_THRUST else thrust
-
-                    if kb.down("left"):
-                        roll = -MAX_ANGLE
-                    elif kb.down("right"):
-                        roll = MAX_ANGLE
+                        roll = MAX_ANGLE * inp.axis("roll")
+                        pitch = MAX_ANGLE * inp.axis("pitch")
+                        yaw_rate = MAX_YAW_RATE * (inp.trigger("yaw_right")
+                                                   - inp.trigger("yaw_left"))
                     else:
-                        roll *= DECAY
+                        if inp.down("w"):
+                            thrust = clamp(thrust + THRUST_STEP, MIN_THRUST, MAX_THRUST)
+                        elif inp.down("s"):
+                            thrust = thrust - THRUST_STEP
+                            thrust = 0.0 if thrust < MIN_THRUST else thrust
 
-                    # Positive pitch drops the front motor and flies forward,
-                    # measured with motorcheck.py, so up is positive. It was
-                    # the other way round, which flew the drone backwards when
-                    # you pressed up.
-                    if kb.down("up"):
-                        pitch = MAX_ANGLE
-                    elif kb.down("down"):
-                        pitch = -MAX_ANGLE
-                    else:
-                        pitch *= DECAY
+                        if inp.down("left"):
+                            roll = -MAX_ANGLE
+                        elif inp.down("right"):
+                            roll = MAX_ANGLE
+                        else:
+                            roll *= DECAY
 
-                    if kb.down("a"):
-                        yaw_rate = -MAX_YAW_RATE
-                    elif kb.down("d"):
-                        yaw_rate = MAX_YAW_RATE
-                    else:
-                        yaw_rate *= DECAY
+                        # Positive pitch drops the front motor and flies
+                        # forward, measured with motorcheck.py, so up is
+                        # positive. It was the other way round, which flew
+                        # the drone backwards when you pressed up.
+                        if inp.down("up"):
+                            pitch = MAX_ANGLE
+                        elif inp.down("down"):
+                            pitch = -MAX_ANGLE
+                        else:
+                            pitch *= DECAY
+
+                        if inp.down("a"):
+                            yaw_rate = -MAX_YAW_RATE
+                        elif inp.down("d"):
+                            yaw_rate = MAX_YAW_RATE
+                        else:
+                            yaw_rate *= DECAY
 
                     # Trim steps on discrete presses, not on hold, so a leaned-on
                     # key cannot run the offset away while you are flying.
