@@ -129,6 +129,20 @@ def setting(name: str, default):
         return default
 
 
+# Resting voltage to percent charge, a generic 1S LiPo curve: flat through the
+# middle, steep at both ends, so expect the reading to sit around 40-60 % for
+# a while and then fall quickly. The pack sags under the motors' load --
+# ~0.55 V on this pack, measured at takeoff and landing edges in the first two
+# recordings -- and the sag tracks flying-or-not rather than the momentary
+# thrust word: the height loop flails thrust far faster than the battery's
+# voltage can follow, and the average current at hover is set by the drone's
+# weight. So charge() undoes a constant sag while airborne and nothing else.
+# ponytail: a generic curve, +-10 %; a hover-to-empty recording can replace it
+# with this pack's own curve (percent = flight time remaining) when wanted.
+LIPO_CURVE = [(3.30, 0.0), (3.50, 10.0), (3.65, 25.0), (3.75, 40.0),
+              (3.85, 55.0), (4.00, 75.0), (4.20, 100.0)]
+
+
 def load_frame() -> dict[str, str] | None:
     """Motor name -> arm, e.g. {"m1": "front", ...}; None unless all four are placed."""
     frame = {str(k): str(v) for k, v in read_json(FRAME_FILE).items()}
@@ -151,6 +165,22 @@ def load_hover() -> float | None:
 
 def save_hover(thrust: float) -> None:
     write_json(HOVER_FILE, {"thrust": int(thrust)})
+
+
+BATTERY_SAG = setting("battery.sag", 0.55)   # volts the pack drops under flying load
+
+
+def charge(vbat: float, airborne: bool) -> float:
+    """Percent charge from the battery voltage, sag-corrected while flying.
+
+    Feed it a voltage smoothed over a second or two; the raw samples jitter
+    by a few hundredths.
+    """
+    rest = vbat + (BATTERY_SAG if airborne else 0.0)
+    for (v0, p0), (v1, p1) in zip(LIPO_CURVE, LIPO_CURVE[1:], strict=False):
+        if rest <= v1:
+            return clamp(p0 + (p1 - p0) * (rest - v0) / (v1 - v0), 0.0, 100.0)
+    return 100.0
 
 
 def heading(mx: float, my: float, mz: float, roll: float, pitch: float,

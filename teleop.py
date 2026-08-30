@@ -46,6 +46,7 @@ from flight import (
     Interruptible,
     Keyboard,
     Trim,
+    charge,
     clamp,
     heading,
     load_hover,
@@ -504,7 +505,12 @@ class Session:
         thrust = (self.fw_thrust or 0.0) if self.hold else self.thrust
         bar = "#" * int(20 * thrust / MAX_THRUST)
         vbat = self.vbat
-        bat = "?" if vbat is None else f"{vbat:.2f}V{' LOW' if vbat < VBAT_CRITICAL else ''}"
+        if vbat is None:
+            bat = "?"
+        else:
+            recent = [s["pm.vbat"] for s in self.battery[-20:]]    # ~2 s of the 10 Hz log
+            pct = charge(sum(recent) / len(recent), self.airborne)
+            bat = f"{vbat:.2f}V {pct:3.0f}%{' LOW' if vbat < VBAT_CRITICAL else ''}"
         z = hdg = ""
         if self.z is not None:
             ground = self.battery[0][Z_LOG]
@@ -518,7 +524,7 @@ class Session:
                 else "HEIGHT" if self.height_mode else "")
         return (f"\r{int(thrust):>6} {bar:<20} "
                 f"roll {self.roll:+5.1f} pitch {self.pitch:+5.1f} yaw {self.yaw_rate:+6.1f}  "
-                f"trim {self.trim.roll:+.1f}/{self.trim.pitch:+.1f}  bat {bat:<9} "
+                f"trim {self.trim.roll:+.1f}/{self.trim.pitch:+.1f}  bat {bat:<14} "
                 f"{z:<15} {hdg:<12} {mode:<9}")
 
     # --- the loop -------------------------------------------------------------
