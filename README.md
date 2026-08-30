@@ -209,6 +209,16 @@ the thrust the firmware is using, and saves it to `data/hover.json` on exit.
 The status line shows `z +0.52>+0.60m`, height since connecting and the
 target, and `HOLD` with the climb rate being asked for.
 
+The height wobbles on purpose-built blindness: the firmware's altitude
+estimator is a ~3 s barometer filter plus an accelerometer path gated by a
+0.04 g deadband -- about the size of the bob the height loop settles into, so
+the estimator under-reports that motion six-fold (compare `acc.z` with
+`estimatedZ` on a flight page). The estimator's knobs are live parameters,
+forgotten at power-off, so teleop writes every entry of `"params"` in
+`data/config.json` to the firmware at each connect -- it ships with
+`{"posEst.vAccDeadband": 0.01}` so the accelerometer sees the bob -- and
+skips, with a note, any name the connected firmware does not offer.
+
 `h` (or A) hands thrust back to the stick at whatever the firmware was using;
 pressing it again engages the hold at the thrust you are hovering at. The
 flag survives a link loss, so teleop clears it right after every connect.

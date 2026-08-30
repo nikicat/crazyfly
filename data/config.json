@@ -1,5 +1,8 @@
 {
   "flip": {
     "min_vbat": 3.7
+  },
+  "params": {
+    "posEst.vAccDeadband": 0.01
   }
 }

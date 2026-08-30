@@ -238,3 +238,18 @@ def test_flight_is_recorded_a_row_per_tick_with_the_log_beside_it(tmp_path, monk
     log = [r for r in rows if r["src"] == "log"]
     assert len(log) == 1 and log[0]["ts"] == "1234" and log[0]["pm.vbat"] == "3.9"
     assert log[0]["roll"] == "" and float(log[0]["t"]) >= float(cmd[0]["t"])
+
+
+def test_configured_params_are_written_to_the_firmware_on_prepare(monkeypatch):
+    """Every entry of config.json's "params" is applied at connect -- the
+    firmware forgets them at power-off -- and unknown names are skipped."""
+    session = teleop.Session(fake_scf(FakeCrazyflie()), flight.Trim(),
+                             mag_offset=None, gamepad=False)
+    session.cf.param.toc.toc.update({"posEst": {"vAccDeadband": object()}})
+    written = {}
+    session.cf.param.set_value = lambda name, value: written.__setitem__(name, value)
+    monkeypatch.setattr(teleop, "setting", lambda name, default:
+                        {"params": {"posEst.vAccDeadband": 0.01, "nosuch.knob": 1}}
+                        .get(name, default))
+    session.prepare()
+    assert written == {"posEst.vAccDeadband": "0.01"}

@@ -55,6 +55,7 @@ from flight import (
     rest_voltage,
     save_hover,
     save_trim,
+    setting,
     stop_motors,
 )
 
@@ -236,9 +237,26 @@ class Session:
             self.set_hold(False)
             self.set_rate_mode(False)       # a session that died mid-flip leaves RATE set
             time.sleep(0.2)
+        self.apply_params()
         # A zero setpoint unlocks the commander; the firmware refuses thrust
         # until it has seen one.
         self.cf.commander.send_setpoint(0, 0, 0, 0)
+
+    def apply_params(self) -> None:
+        """Write config.json's "params" map to the firmware, e.g. posEst.vAccDeadband.
+
+        The firmware keeps parameters in RAM and forgets them at power-off,
+        which is why they are re-applied on every connect. A name this
+        firmware does not offer is skipped with a note, not an error.
+        """
+        toc = self.cf.param.toc.toc
+        for name, value in setting("params", {}).items():
+            group, _, field = str(name).partition(".")
+            if group in toc and field in toc[group]:
+                self.cf.param.set_value(name, str(value))
+                print(f"Param {name} = {value}", flush=True)
+            else:
+                print(f"Param {name}: not on this firmware, skipped", flush=True)
 
     def log_variables(self) -> dict[str, str]:
         """Battery at 10 Hz, plus height, thrust and the compass where the firmware has them."""

@@ -44,7 +44,7 @@ TRIM_FILE = DATA / "trim.json"
 MAG_FILE = DATA / "mag.json"                # hard-iron offset from `cf.py mag --save`
 HOVER_FILE = DATA / "hover.json"            # thrust the drone last hovered at, learnt by teleop
 FRAME_FILE = DATA / "frame.json"            # which arm each motor is on
-CONFIG_FILE = DATA / "config.json"          # knobs: {"flip": {"min_vbat": 3.7}}
+CONFIG_FILE = DATA / "config.json"          # flip.min_vbat, battery.sag, params.*
 ARMS = ("front", "right", "back", "left")
 
 JS_DEVICE = "/dev/input/js0"
