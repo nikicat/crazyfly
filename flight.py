@@ -40,6 +40,7 @@ VBAT_CRITICAL = 3.4      # volts; land now. Full is ~4.2, sags a few tenths unde
 TRIM_FILE = Path(__file__).with_name("trim.json")
 MAG_FILE = Path(__file__).with_name("mag.json")    # hard-iron offset from `cf.py mag --save`
 FRAME_FILE = Path(__file__).with_name("frame.json")  # which arm each motor is on
+CONFIG_FILE = Path(__file__).with_name("config.json")  # knobs: {"flip": {"min_vbat": 3.7}}
 ARMS = ("front", "right", "back", "left")
 
 JS_DEVICE = "/dev/input/js0"
@@ -76,6 +77,17 @@ def load_mag_offset() -> tuple[float, float, float] | None:
         return float(saved["x"]), float(saved["y"]), float(saved["z"])
     except (OSError, ValueError, KeyError):
         return None
+
+
+def setting(name: str, default):
+    """A knob from config.json by dotted name, e.g. setting("flip.min_vbat", 3.7)."""
+    try:
+        value = json.loads(CONFIG_FILE.read_text())
+        for key in name.split("."):
+            value = value[key]
+        return type(default)(value)
+    except (OSError, ValueError, KeyError, TypeError):
+        return default
 
 
 def load_frame() -> dict[str, str] | None:

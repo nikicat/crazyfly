@@ -55,12 +55,12 @@ KEYBOARD_HELP = """\
   w / s     thrust up / down     arrows   roll and pitch     a / d   yaw
   space     cut thrust           [ ] ; '  trim roll / pitch  0       reset trim
   h         height hold on/off (then w / s climb / sink)    ESC / q  land and quit
-  f         roll flip -- needs 3.9 V and two metres of air"""
+  f         roll flip -- battery above flip.min_vbat (config.json), two metres of air"""
 GAMEPAD_HELP = """\
   left stick   thrust (centre = off)   right stick   roll and pitch    LT / RT  yaw
   B            cut thrust              D-pad         trim roll / pitch  View     reset trim
   A            height hold on/off (then left stick climbs / sinks)   Menu / q  land and quit
-  Y            roll flip -- needs 3.9 V and two metres of air"""
+  Y            roll flip -- battery above flip.min_vbat (config.json), two metres of air"""
 QUIT_KEYS = {"q", "ESC"}  # the gamepad's Menu button arrives as "q"
 
 # Height hold, firmware 2017.06: with flightmode.althold set the thrust word is

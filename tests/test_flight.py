@@ -246,6 +246,19 @@ def test_unanswered_version_request_falls_back_to_legacy(monkeypatch):
     assert done == [3]
 
 
+# --- config.json ----------------------------------------------------------
+
+def test_setting_reads_config_or_falls_back(tmp_path, monkeypatch):
+    path = tmp_path / "config.json"
+    monkeypatch.setattr(flight, "CONFIG_FILE", path)
+    assert flight.setting("flip.min_vbat", 3.7) == 3.7          # no file
+    path.write_text('{"flip": {"min_vbat": 3.5}}')
+    assert flight.setting("flip.min_vbat", 3.7) == 3.5
+    assert flight.setting("flip.nothing", 1.0) == 1.0           # missing key
+    path.write_text("not json")
+    assert flight.setting("flip.min_vbat", 3.7) == 3.7          # broken file
+
+
 # --- flip -----------------------------------------------------------------
 
 def test_flip_never_sends_a_rate_while_in_angle_mode():

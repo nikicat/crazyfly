@@ -148,7 +148,7 @@ uv run teleop.py
 w / s     thrust up / down          arrows    roll and pitch
 a / d     yaw left / right          space     cut thrust to zero
 h         height hold on / off      ESC / q   land and quit
-f         roll flip (3.9 V, two metres of air)
+f         roll flip (battery above flip.min_vbat, two metres of air)
 ```
 
 Or with an Xbox controller paired over Bluetooth (`/dev/input/js0`):
@@ -163,7 +163,7 @@ right stick   roll and pitch, proportional     B        cut thrust to zero
 LT / RT       yaw left / right, proportional
 D-pad         trim roll / pitch                View     reset trim
 A             height hold on / off             Menu     land and quit
-Y             roll flip (3.9 V, two metres of air)
+Y             roll flip (battery above flip.min_vbat, two metres of air)
 keyboard      q / ESC / space still work
 ```
 
@@ -203,8 +203,9 @@ degrees, so roll and pitch switch to rate mode for the spin -- the roll value
 sent is then degrees per second -- and back to angle mode for the catch, with
 a couple of ticks of zeros around each switch so a rate is never read as an
 angle. Climb at full thrust, spin at 1500 deg/s on low thrust until the gyro
-has counted 330 degrees, catch at full thrust. It refuses under 3.9 V or on
-the ground, and any exit path restores angle mode.
+has counted 330 degrees, catch at full thrust. It refuses on the ground or
+with the battery under `flip.min_vbat` in `config.json` (3.7 V), and any exit
+path restores angle mode.
 
 This airframe hovers at ~64% throttle, so it has only ~1.5x hover in reserve:
 expect to lose about a metre. Fly it over a bed with a ceiling to spare.

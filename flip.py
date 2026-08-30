@@ -18,9 +18,9 @@ CLIMB_S are the knobs.
 """
 from __future__ import annotations
 
-from flight import MAX_THRUST
+from flight import MAX_THRUST, setting
 
-MIN_VBAT = 3.9           # below this the catch has no margin; refuse
+MIN_VBAT = setting("flip.min_vbat", 3.7)   # below this the catch has no margin; refuse
 CLIMB_S = 0.4
 ARM_S = 0.06             # two ticks for a mode switch to land before it matters
 SPIN_RATE = 1500.0       # deg/s; the gyro reads to 2000
