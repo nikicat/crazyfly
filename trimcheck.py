@@ -40,6 +40,12 @@ YAW_DRIFT_DEG = 2.0   # yaw creep over the window that means gyro is unsettled
 STEADY_WINDOW = 20    # samples (2 s) that must be quiet before recording
 SETTLE_TIMEOUT = 40.0  # seconds; give up waiting and record anyway
 
+VARIABLES = {
+    "stabilizer.roll": "float",
+    "stabilizer.pitch": "float",
+    "stabilizer.yaw": "float",
+}
+
 
 class Reading:
     def __init__(self, roll: list[float], pitch: list[float], yaw: list[float]):
@@ -60,53 +66,57 @@ class Reading:
         print(f"    yaw drift {self.yaw_drift:+7.2f} deg over {SAMPLES / 10:.0f} s")
 
 
-VARIABLES = {
-    "stabilizer.roll": "float",
-    "stabilizer.pitch": "float",
-    "stabilizer.yaw": "float",
-}
+class Sampler:
+    """Log handler that waits for the estimate to go quiet, then records SAMPLES."""
+
+    def __init__(self) -> None:
+        self.roll: list[float] = []
+        self.pitch: list[float] = []
+        self.yaw: list[float] = []
+        self.window: deque[tuple[float, float]] = deque(maxlen=STEADY_WINDOW)
+        self.settled = False
+        self.started = time.time()
+
+    def _quiet(self, roll: float, pitch: float) -> bool:
+        """True once STEADY_WINDOW samples have stayed still, or waiting has run out."""
+        self.window.append((roll, pitch))
+        if len(self.window) == self.window.maxlen:
+            spread = max(statistics.pstdev([w[0] for w in self.window]),
+                         statistics.pstdev([w[1] for w in self.window]))
+            if spread <= STILL_DEG:
+                return True
+        waited = time.time() - self.started
+        if waited > SETTLE_TIMEOUT:
+            print("\r    estimate never went fully quiet; recording anyway")
+            return True
+        print(f"\r    waiting for the estimate to settle ... {waited:4.1f}s",
+              end="", flush=True)
+        return False
+
+    def __call__(self, data) -> bool:
+        roll, pitch = data["stabilizer.roll"], data["stabilizer.pitch"]
+        if not self.settled:
+            self.settled = self._quiet(roll, pitch)
+            if not self.settled:
+                return False
+            print("\r" + " " * 50 + "\r", end="")
+        self.roll.append(roll)
+        self.pitch.append(pitch)
+        self.yaw.append(data["stabilizer.yaw"])
+        print(f"\r    sampling {len(self.roll)}/{SAMPLES} ...", end="", flush=True)
+        return len(self.roll) >= SAMPLES
+
+    def reading(self) -> Reading:
+        return Reading(self.roll, self.pitch, self.yaw)
 
 
 def measure(scf) -> Reading:
-    roll: list[float] = []
-    pitch: list[float] = []
-    yaw: list[float] = []
-    window: deque[tuple[float, float]] = deque(maxlen=STEADY_WINDOW)
-    state = {"settled": False, "started": time.time()}
-
-    def handle(data) -> bool:
-        r = data["stabilizer.roll"]
-        p = data["stabilizer.pitch"]
-
-        if not state["settled"]:
-            window.append((r, p))
-            if len(window) == window.maxlen:
-                spread = max(statistics.pstdev([w[0] for w in window]),
-                             statistics.pstdev([w[1] for w in window]))
-                if spread <= STILL_DEG:
-                    state["settled"] = True
-            waited = time.time() - state["started"]
-            if not state["settled"] and waited > SETTLE_TIMEOUT:
-                print("\r    estimate never went fully quiet; recording anyway")
-                state["settled"] = True
-            if not state["settled"]:
-                print(f"\r    waiting for the estimate to settle ... {waited:4.1f}s",
-                      end="", flush=True)
-                return False
-            print("\r" + " " * 50 + "\r", end="")
-
-        roll.append(r)
-        pitch.append(p)
-        yaw.append(data["stabilizer.yaw"])
-        print(f"\r    sampling {len(roll)}/{SAMPLES} ...", end="", flush=True)
-        return len(roll) >= SAMPLES
-
+    sampler = Sampler()
     # Allow for the settle wait plus the recording itself.
-    cfenv.stream_log(scf, VARIABLES, handle,
+    cfenv.stream_log(scf, VARIABLES, sampler,
                      timeout=SETTLE_TIMEOUT + SAMPLES * 0.1 * 3 + 10)
-
     print("\r" + " " * 34 + "\r", end="")
-    return Reading(roll, pitch, yaw)
+    return sampler.reading()
 
 
 def check_steady(reading: Reading) -> None:
@@ -170,11 +180,7 @@ def run(
 ) -> None:
     """Diagnose drift: gyro bias, sensor offset, or mechanical."""
 
-    cfenv.init()
-    uri = cfenv.resolve_uri(uri)
-
-    print(f"Connecting to {uri} ...")
-    with cfenv.connect(uri) as scf:
+    with cfenv.session(uri) as scf:
         print("Connected.\n")
 
         print("Keep the drone still on a flat surface.")

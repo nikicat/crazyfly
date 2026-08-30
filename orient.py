@@ -69,11 +69,7 @@ def classify(d_roll: float, d_pitch: float) -> tuple[str | None, str, str]:
 
 def run(uri: str | None = None) -> None:
     """Work out which arm of the drone is the front, by tilting it."""
-    cfenv.init()
-    uri = cfenv.resolve_uri(uri)
-
-    print(f"Connecting to {uri} ...")
-    with cfenv.connect(uri) as scf:
+    with cfenv.session(uri) as scf:
         print("Connected.\n")
 
         print("1. Put the drone flat on the table and leave it alone.")

@@ -129,6 +129,44 @@ def connect(uri: str, timeout: float = CONNECT_TIMEOUT,
     return TimedSyncCrazyflie(uri, cf=Crazyflie(rw_cache="./cache"), timeout=timeout)
 
 
+@contextmanager
+def session(uri: str | None):
+    """Drivers up, URI resolved, link open, parameters in: the start of every tool.
+
+    The progress line goes to stderr so a tool that streams data to stdout
+    stays clean.
+    """
+    init()
+    uri = resolve_uri(uri)
+    print(f"Connecting to {uri} ...", file=sys.stderr, flush=True)
+    with connect(uri) as scf:
+        scf.wait_for_params()
+        yield scf
+
+
+def _start_log(scf, name: str, variables: dict[str, str], period_ms: int) -> LogConfig:
+    """Register a log block for `variables` with the drone; the caller starts it."""
+    config = LogConfig(name=name, period_in_ms=period_ms)
+    for variable, ctype in variables.items():
+        config.add_variable(variable, ctype)
+    scf.cf.log.add_config(config)
+    if not config.valid:
+        raise LinkLost(
+            f"The drone does not offer all of {', '.join(variables)}.\n"
+            "Its log table of contents lists: "
+            f"{', '.join(sorted(scf.cf.log.toc.toc))}"
+        )
+    return config
+
+
+def _stop_log(config: LogConfig) -> None:
+    try:
+        config.stop()
+        config.delete()
+    except Exception:  # noqa: BLE001 - cleanup must not mask the real error
+        pass
+
+
 def stream_log(scf, variables: dict[str, str], handler, timeout: float,
                period_ms: int = 100) -> None:
     """Feed each log sample to `handler` until it returns True or time runs out.
@@ -138,16 +176,13 @@ def stream_log(scf, variables: dict[str, str], handler, timeout: float,
     no data at all -- its control channel answers while the log task is wedged
     -- and that left every caller hung with no way out but Ctrl-C.
     """
-    config = LogConfig(name="stream", period_in_ms=period_ms)
-    for name, ctype in variables.items():
-        config.add_variable(name, ctype)
-
     done = Event()
     errors: list[str] = []
-    received = [False]
+    received = False
 
     def on_data(_timestamp, data, _config) -> None:
-        received[0] = True
+        nonlocal received
+        received = True
         if handler(data):
             done.set()
 
@@ -155,30 +190,18 @@ def stream_log(scf, variables: dict[str, str], handler, timeout: float,
         errors.append(str(message))
         done.set()
 
+    config = _start_log(scf, "stream", variables, period_ms)
     config.data_received_cb.add_callback(on_data)
     config.error_cb.add_callback(on_error)
-
-    scf.cf.log.add_config(config)
-    if not config.valid:
-        raise LinkLost(
-            f"The drone does not offer all of {', '.join(variables)}.\n"
-            "Its log table of contents lists: "
-            f"{', '.join(sorted(scf.cf.log.toc.toc))}"
-        )
-
     config.start()
     try:
         finished = done.wait(timeout)
     finally:
-        try:
-            config.stop()
-            config.delete()
-        except Exception:  # noqa: BLE001 - cleanup must not mask the real error
-            pass
+        _stop_log(config)
 
     if errors:
         raise LinkLost(f"The drone rejected the log block: {errors[0]}")
-    if not received[0]:
+    if not received:
         raise LinkLost(NO_TELEMETRY)
     if not finished:
         raise LinkLost(
@@ -194,27 +217,15 @@ def record_log(scf, variables: dict[str, str], period_ms: int = 50):
     Unlike stream_log this does not block, so telemetry can be captured during
     a flight rather than instead of one.
     """
-    config = LogConfig(name="record", period_in_ms=period_ms)
-    for name, ctype in variables.items():
-        config.add_variable(name, ctype)
-
     samples: list[dict] = []
+    config = _start_log(scf, "record", variables, period_ms)
     config.data_received_cb.add_callback(
         lambda _ts, data, _cfg: samples.append(dict(data)))
-
-    scf.cf.log.add_config(config)
-    if not config.valid:
-        raise LinkLost(f"The drone does not offer all of {', '.join(variables)}.")
-
     config.start()
     try:
         yield samples
     finally:
-        try:
-            config.stop()
-            config.delete()
-        except Exception:  # noqa: BLE001 - cleanup must not mask the real error
-            pass
+        _stop_log(config)
 
 
 def sample_series(scf, variables: dict[str, str], count: int,

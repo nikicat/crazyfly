@@ -28,13 +28,8 @@ def param(cf, name: str, default: str = "?") -> str:
 
 def run(uri: str | None = None) -> None:
     """Connect and report model, firmware, battery and attitude."""
-    cfenv.init()
-    uri = cfenv.resolve_uri(uri)
-
-    print(f"Connecting to {uri} ...")
-    with cfenv.connect(uri) as scf:
+    with cfenv.session(uri) as scf:
         cf = scf.cf
-        scf.wait_for_params()
         legacy = cf.platform.get_protocol_version() < 0
         print("Connected.\n")
 

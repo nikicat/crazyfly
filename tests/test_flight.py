@@ -83,7 +83,7 @@ def descends_monotonically(thrusts: list[int]) -> bool:
 # --- hop profile ----------------------------------------------------------
 
 def test_hop_rises_then_falls_to_zero(cf):
-    reason = hoptest.hop(cf, thrust=36000, hold=0.3, roll_trim=0, pitch_trim=0)
+    reason = hoptest.hop(cf, thrust=36000, hold=0.3, trim=flight.Trim())
     thrusts = cf.commander.thrusts
 
     assert reason == "completed"
@@ -95,7 +95,7 @@ def test_hop_rises_then_falls_to_zero(cf):
 def test_hop_does_not_rebound_on_landing(cf):
     """Regression: the landing ramp used to restart from the hover thrust,
     giving an unwanted second hop just as the drone touched down."""
-    hoptest.hop(cf, thrust=36000, hold=0.3, roll_trim=0, pitch_trim=0)
+    hoptest.hop(cf, thrust=36000, hold=0.3, trim=flight.Trim())
     thrusts = cf.commander.thrusts
 
     peak = thrusts.index(max(thrusts))
@@ -114,7 +114,7 @@ def test_hop_applies_trim_while_airborne(monkeypatch):
 
     drone = FakeCrazyflie()
     drone.commander = RecordingCommander()
-    hoptest.hop(drone, thrust=30000, hold=0.2, roll_trim=-0.3, pitch_trim=-1.9)
+    hoptest.hop(drone, thrust=30000, hold=0.2, trim=flight.Trim(-0.3, -1.9))
 
     assert seen, "no airborne setpoints recorded"
     assert all(rp == (-0.3, -1.9) for rp in seen)
@@ -130,7 +130,7 @@ def test_ctrl_c_mid_hover_still_lands(cf):
         os.kill(os.getpid(), signal.SIGINT)
 
     threading.Thread(target=interrupt_once_airborne, daemon=True).start()
-    reason = hoptest.hop(cf, thrust=30000, hold=5.0, roll_trim=0, pitch_trim=0)
+    reason = hoptest.hop(cf, thrust=30000, hold=5.0, trim=flight.Trim())
     thrusts = cf.commander.thrusts
 
     assert reason == "interrupted"
@@ -141,7 +141,7 @@ def test_ctrl_c_mid_hover_still_lands(cf):
 
 def test_sigint_handler_is_restored(cf):
     before = signal.getsignal(signal.SIGINT)
-    hoptest.hop(cf, thrust=20000, hold=0.2, roll_trim=0, pitch_trim=0)
+    hoptest.hop(cf, thrust=20000, hold=0.2, trim=flight.Trim())
     assert signal.getsignal(signal.SIGINT) is before
 
 
@@ -199,7 +199,92 @@ def test_teleop_up_arrow_flies_forward():
     assert teleop.held_axis(Holding("up"), "down", "up", 0.0, 15.0) == 15.0
     assert teleop.held_axis(Holding("down"), "down", "up", 0.0, 15.0) == -15.0
     assert teleop.held_axis(Holding(), "down", "up", 10.0, 15.0) == 10.0 * flight.DECAY
-    assert 'held_axis(inp, "down", "up", pitch, MAX_ANGLE)' in inspect.getsource(teleop.run)
+    assert ('held_axis(inp, "down", "up", self.pitch, MAX_ANGLE)'
+            in inspect.getsource(teleop.Session.read_keyboard))
+
+
+class ScriptedInput:
+    """A keyboard whose keys are held for a scripted number of ticks, then released."""
+
+    def __init__(self, *script: tuple[str, int]) -> None:
+        self.script = list(script)          # (key, ticks held)
+        self.current: str | None = None
+
+    def poll(self) -> list[str]:
+        if self.script and self.script[0][1] <= 0:
+            self.script.pop(0)
+        if not self.script:
+            self.current = None
+            return []
+        key, ticks = self.script[0]
+        self.script[0] = (key, ticks - 1)
+        first = self.current != key
+        self.current = key
+        return [key] if first else []
+
+    def down(self, key: str) -> bool:
+        return key == self.current
+
+
+def fake_scf(cf) -> object:
+    """A SyncCrazyflie stand-in whose link stays up until close_link()."""
+    toc = type("T", (), {"toc": {}})()
+    cf.param = type("P", (), {"toc": toc, "set_value": lambda *_a: None})()
+    cf.log = type("L", (), {"toc": toc})()
+
+    class Scf:
+        def __init__(self):
+            self.cf = cf
+            self.open = True
+
+        def is_link_open(self):
+            return self.open
+
+        def close_link(self):
+            self.open = False
+
+    return Scf()
+
+
+def test_teleop_session_flies_up_and_lands_on_quit(monkeypatch):
+    """Holding w raises thrust a step per tick; q ramps it down to zero, never
+    up again, and closes the link -- the whole loop, off-line."""
+    import teleop
+
+    class NullRecorder:
+        def __enter__(self):
+            return []
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(cfenv_module, "record_log", lambda *_a, **_k: NullRecorder())
+
+    drone = FakeCrazyflie()
+    scf = fake_scf(drone)
+    session = teleop.Session(scf, flight.Trim(0.5, -1.0), mag_offset=None, gamepad=False)
+    session.fly(ScriptedInput(("w", 10), ("q", 1)), flight.Interruptible())
+    thrusts = drone.commander.thrusts
+
+    assert max(thrusts) == flight.MIN_THRUST + 9 * flight.THRUST_STEP
+    assert thrusts[-1] == 0
+    assert descends_monotonically(thrusts)
+    assert not scf.open
+    assert session.trim == (0.5, -1.0)
+
+
+def test_teleop_trim_keys_step_and_reset():
+    import teleop
+
+    drone = FakeCrazyflie()
+    session = teleop.Session(fake_scf(drone), flight.Trim(), mag_offset=None, gamepad=False)
+    session.handle_keys(["]", "]", "'"])
+    assert session.trim == pytest.approx((2 * teleop.TRIM_STEP, teleop.TRIM_STEP))
+    session.handle_keys(["0"])
+    assert session.trim == (0.0, 0.0)
+    for _ in range(100):
+        session.handle_keys(["["])
+    assert session.trim.roll == -flight.TRIM_LIMIT
 
 
 # --- cf1compat: protocol version deadline ---------------------------------
@@ -685,22 +770,12 @@ def test_bias_drift_estimate_explains_a_metre():
 # --- answering the hop prompt ---------------------------------------------
 
 def apply_answer(answer, roll_trim=0.0, pitch_trim=0.0, invert_pitch=False):
-    """Mirror of hoptest's answer handling, for testing the parsing rules."""
-    directions = [c for c in dict.fromkeys(answer) if c in hoptest.CORRECTIONS]
-    if not directions:
+    """The trim after answering the hop prompt with `answer`; None if it is rejected."""
+    try:
+        directions, _ignored = hoptest.parse_drift(answer)
+    except ValueError:
         return None
-    axes = {hoptest.CORRECTIONS[c][0] for c in directions}
-    if len(axes) < len(directions):
-        return None
-    for letter in directions:
-        axis, direction = hoptest.CORRECTIONS[letter]
-        if axis == "pitch" and invert_pitch:
-            direction = -direction
-        if axis == "roll":
-            roll_trim += direction * hoptest.CORRECTION_STEP
-        else:
-            pitch_trim += direction * hoptest.CORRECTION_STEP
-    return roll_trim, pitch_trim
+    return hoptest.correct(flight.Trim(roll_trim, pitch_trim), directions, invert_pitch)
 
 
 def test_diagonal_answer_moves_both_axes():
@@ -737,6 +812,17 @@ def test_answer_order_does_not_matter():
 
 def test_repeated_letters_apply_once():
     assert apply_answer("rr") == apply_answer("r")
+
+
+def test_unknown_letters_are_reported_not_dropped():
+    directions, ignored = hoptest.parse_drift("rxb")
+    assert directions == ["r", "b"]
+    assert ignored == ["x"]
+
+
+def test_correction_stops_at_the_trim_limit():
+    trim = flight.Trim(-flight.TRIM_LIMIT + 0.1, 0.0)
+    assert hoptest.correct(trim, ["r"]).roll == -flight.TRIM_LIMIT
 
 
 # --- the command router ---------------------------------------------------
@@ -800,7 +886,7 @@ def frame_report(gains):
     """Build the shape motorcheck.summarise returns, from four gains."""
     import motorcheck
 
-    return {motor: {"gain": g, "correlation": 0.97, "low": 8000, "high": 20000}
+    return {motor: motorcheck.MotorResponse(g, correlation=0.97, low=8000, high=20000)
             for motor, g in zip(motorcheck.MOTORS, gains, strict=True)}
 
 
@@ -858,14 +944,11 @@ def test_movers_per_end_follows_the_frame(gains, expected_movers):
     import motorcheck
 
     report = frame_report(gains)
-    frame, _ranked, _ratio = motorcheck.detect_frame(report)
-    movers = 1 if frame == "plus" else 2
+    frame = motorcheck.detect_frame(report)
 
-    assert movers == expected_movers
+    assert frame.movers == expected_movers
 
-    by_gain = sorted(motorcheck.MOTORS, key=lambda m: report[m]["gain"])
-    low_on_plus = by_gain[:movers]
-    low_on_minus = by_gain[-movers:]
+    low_on_plus, low_on_minus = motorcheck.axis_ends(report, frame.movers)
 
     assert not set(low_on_plus) & set(low_on_minus), "ends must not overlap"
-    assert report[low_on_plus[0]]["gain"] < 0 < report[low_on_minus[0]]["gain"]
+    assert report[low_on_plus[0]].gain < 0 < report[low_on_minus[0]].gain

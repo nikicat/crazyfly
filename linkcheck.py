@@ -50,37 +50,34 @@ def drain(cr: Crazyradio, rounds: int = 12) -> None:
         poll(cr)
 
 
-def probe(cr: Crazyradio, payload: tuple[int, ...], want_port: int,
+def probe(cr: Crazyradio, payload: tuple[int, ...], accept,
           polls: int = 25, attempts: int = 3) -> bytes | None:
-    """Send a request and return only a reply that came back on the same port.
+    """Send a request and return the first later ack payload `accept` likes.
 
     The Crazyflie answers in a later ack payload, not the one for the request
-    itself, so we poll -- but a reply only counts if its port matches what we
-    asked, otherwise late traffic from a previous probe looks like a response.
+    itself, so we poll -- and `accept` decides what counts, otherwise late
+    traffic from a previous probe looks like a response.
     """
     for _ in range(attempts):
         drain(cr)
         got = bytes(cr.send_packet(payload).data or b"")
         for _ in range(polls):
-            if got and got[0] not in IDLE and (got[0] >> 4) == want_port:
+            if accept(got):
                 return got
             got = poll(cr)
     return None
 
 
-def probe_echo(cr: Crazyradio, attempts: int = 3) -> bool:
+def on_port(port: int):
+    """Accept a real reply on `port`: not idle filler, not another port's traffic."""
+    return lambda got: bool(got) and got[0] not in IDLE and (got[0] >> 4) == port
+
+
+def probe_echo(cr: Crazyradio) -> bool:
     """Link-service echo. Validated by exact payload, since idle filler
     shares port 15 and would otherwise pass a port-only check."""
     payload = (hdr(15, 0), 0xAA, 0xBB)
-    want = bytes(payload)
-    for _ in range(attempts):
-        drain(cr)
-        got = bytes(cr.send_packet(payload).data or b"")
-        for _ in range(15):
-            if got == want:
-                return True
-            got = poll(cr)
-    return False
+    return probe(cr, payload, lambda got: got == bytes(payload), polls=15) is not None
 
 
 def check(cr: Crazyradio, channel: int, datarate: str, address: int) -> None:
@@ -110,7 +107,7 @@ def check(cr: Crazyradio, channel: int, datarate: str, address: int) -> None:
     generations = set()
     for port, name in ((2, "param TOC"), (5, "log TOC")):
         for cmd, version in ((0x03, "v2"), (0x01, "v1")):
-            reply = probe(cr, (hdr(port, 0), cmd), want_port=port)
+            reply = probe(cr, (hdr(port, 0), cmd), on_port(port))
             if reply:
                 count = reply[2] if version == "v1" else int.from_bytes(reply[2:4], "little")
                 alive.append(f"{name} {version} ({count} items)")
@@ -119,7 +116,7 @@ def check(cr: Crazyradio, channel: int, datarate: str, address: int) -> None:
     print(f"  CRTP services  : {', '.join(alive) if alive else 'NONE answered'}")
 
     # Only the 2.x implements the platform service; its absence is normal on a 1.0.
-    platform = probe(cr, (hdr(13, 1), 0x00), want_port=13)
+    platform = probe(cr, (hdr(13, 1), 0x00), on_port(13))
     print(f"  platform svc   : {'yes' if platform else 'no (normal on a Crazyflie 1.0)'}")
 
     print()
@@ -156,6 +153,7 @@ def run(
         check(radio, channel, datarate, int(address, 16))
     finally:
         radio.close()
+
 
 if __name__ == "__main__":
     cfenv.run(lambda: typer.run(run))

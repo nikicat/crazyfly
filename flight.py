@@ -16,7 +16,9 @@ import sys
 import termios
 import time
 import tty
+from collections.abc import Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 # A 250K link tops out around 35 setpoints/s once each send blocks on its ack,
 # so asking for 50 Hz just means the sleep never fires. Pace to what the link
@@ -57,18 +59,36 @@ JS_TRIGGERS = {"yaw_left": 5, "yaw_right": 4}   # LT / RT, analog, rest at -1
 JS_BUTTONS = {0: "h", 1: " ", 4: "f", 10: "0", 11: "q"}
 JS_HATS = {(6, -1): "[", (6, +1): "]",          # D-pad left/right: roll trim
            (7, -1): "'", (7, +1): ";"}          # D-pad up/down: pitch trim fwd/back
+QUIT_KEYS = {"q", "ESC"}                        # the gamepad's Menu button arrives as "q"
 
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def load_trim() -> tuple[float, float]:
+class Trim(NamedTuple):
+    """Constant roll/pitch offset added to every setpoint, to cancel a steady drift."""
+
+    roll: float = 0.0
+    pitch: float = 0.0
+
+    def nudge(self, axis: str, delta: float) -> Trim:
+        """This trim with `axis` moved by `delta` degrees, held within TRIM_LIMIT."""
+        value = clamp(getattr(self, axis) + delta, -TRIM_LIMIT, TRIM_LIMIT)
+        return self._replace(**{axis: value})
+
+    def override(self, roll: float | None, pitch: float | None) -> Trim:
+        """Explicit values win; None keeps what was saved."""
+        return Trim(self.roll if roll is None else roll,
+                    self.pitch if pitch is None else pitch)
+
+
+def load_trim() -> Trim:
     try:
         saved = json.loads(TRIM_FILE.read_text())
-        return float(saved["roll"]), float(saved["pitch"])
+        return Trim(float(saved["roll"]), float(saved["pitch"]))
     except (OSError, ValueError, KeyError):
-        return 0.0, 0.0
+        return Trim()
 
 
 def load_mag_offset() -> tuple[float, float, float] | None:
@@ -126,6 +146,36 @@ def heading(mx: float, my: float, mz: float, roll: float, pitch: float,
 def save_trim(roll: float, pitch: float) -> None:
     TRIM_FILE.write_text(json.dumps({"roll": round(roll, 2),
                                      "pitch": round(pitch, 2)}, indent=2) + "\n")
+
+
+def ticks(duration: float) -> Iterator[tuple[float, float]]:
+    """Yield (fraction elapsed, now) every DT until `duration` seconds have passed.
+
+    The pacing sleep happens between yields, so a loop that breaks out early
+    leaves at once.
+    """
+    start = time.time()
+    while True:
+        now = time.time()
+        elapsed = now - start
+        if elapsed >= duration:
+            return
+        yield elapsed / duration, now
+        time.sleep(DT)
+
+
+def ramp_level(top: float, frac: float) -> float:
+    """Thrust `frac` of the way from idle up to `top`."""
+    return MIN_THRUST + (top - MIN_THRUST) * frac
+
+
+def phase_level(phase: str, top: float, frac: float) -> float:
+    """Thrust for a ramp/hold schedule: "up" ramps to `top`, "down" ramps back."""
+    if phase == "up":
+        return ramp_level(top, frac)
+    if phase == "down":
+        return ramp_level(top, 1 - frac)
+    return top
 
 
 def stop_motors(cf, from_thrust: float = 0.0, step: float = THRUST_STEP,

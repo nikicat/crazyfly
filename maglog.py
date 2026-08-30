@@ -37,16 +37,37 @@ PERIOD_MS = 50
 MIN_SWING = 0.5          # gauss; a full turn swings each axis by about twice Earth's field
 
 
+def say(*args) -> None:
+    """Messages go to stderr, keeping stdout for the data."""
+    print(*args, file=sys.stderr, flush=True)
+
+
+def summarise(field: dict[str, list[float]], save: bool) -> None:
+    """Per-axis range and hard-iron offset; saved to mag.json when the turn was full."""
+    count = len(field["mag.x"])
+    say(f"{count} samples written.")
+    if not count:
+        return
+    for axis, values in field.items():
+        say(f"  {axis}: min {min(values):+8.3f}  max {max(values):+8.3f}  "
+            f"mean {statistics.fmean(values):+8.3f}  "
+            f"hard-iron offset {(min(values) + max(values)) / 2:+8.3f}")
+    if not save:
+        return
+    swing = min(max(v) - min(v) for v in field.values())
+    if swing < MIN_SWING:
+        say(f"Not saved: an axis swung only {swing:.2f} G, so the drone was not "
+            f"turned through every orientation. Need {MIN_SWING} G on each.")
+        return
+    save_mag_offset(*((min(v) + max(v)) / 2 for v in field.values()))
+    say(f"Offset saved to {MAG_FILE.name}; teleop will show a heading.")
+
+
 def run(seconds: float = 30.0, out: Path = Path("mag.csv"), save: bool = False,
         uri: str | None = None) -> None:
     """Record the magnetometer to a CSV, with attitude, thrust and battery."""
-    cfenv.init()
-    uri = cfenv.resolve_uri(uri)
-    say = lambda *a: print(*a, file=sys.stderr, flush=True)     # noqa: E731 - keep stdout for data
-
-    say(f"Connecting to {uri} ...")
     field: dict[str, list[float]] = {axis: [] for axis in ("mag.x", "mag.y", "mag.z")}
-    with cfenv.connect(uri) as scf, out.open("w", newline="") as f:
+    with cfenv.session(uri) as scf, out.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["t", *VARIABLES])
         writer.writeheader()
         f.flush()
@@ -65,21 +86,7 @@ def run(seconds: float = 30.0, out: Path = Path("mag.csv"), save: bool = False,
             cfenv.stream_log(scf, VARIABLES, collect, period_ms=PERIOD_MS,
                              timeout=seconds + 5 if seconds > 0 else None)
         finally:
-            count = len(field["mag.x"])
-            say(f"{count} samples written.")
-            if count:
-                for axis, values in field.items():
-                    say(f"  {axis}: min {min(values):+8.3f}  max {max(values):+8.3f}  "
-                        f"mean {statistics.fmean(values):+8.3f}  "
-                        f"hard-iron offset {(min(values) + max(values)) / 2:+8.3f}")
-            if save and count:
-                swing = min(max(v) - min(v) for v in field.values())
-                if swing < MIN_SWING:
-                    say(f"Not saved: an axis swung only {swing:.2f} G, so the drone was not "
-                        f"turned through every orientation. Need {MIN_SWING} G on each.")
-                else:
-                    save_mag_offset(*((min(v) + max(v)) / 2 for v in field.values()))
-                    say(f"Offset saved to {MAG_FILE.name}; teleop will show a heading.")
+            summarise(field, save)
 
 
 if __name__ == "__main__":

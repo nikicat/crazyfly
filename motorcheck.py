@@ -45,13 +45,12 @@ from the motor that reached zero instead of asking you to spot it.
 """
 from __future__ import annotations
 
-import statistics
-import time
+from typing import NamedTuple
 
 import typer
 
 import cfenv
-from flight import DT, Interruptible, load_frame, stop_motors
+from flight import DT, Interruptible, load_frame, stop_motors, ticks
 from signals import best_fit
 
 PROBE_PITCH = 20.0       # degrees; deliberately unreachable, to saturate output
@@ -71,7 +70,7 @@ PITCH_MARGIN = 1.3       # overshoot the angle that would just reach zero
 MAX_PROBE_PITCH = 70.0   # beyond this the firmware clamps the setpoint anyway
 MAX_ATTEMPTS = 3
 
-MOTORS = ("motor.m1", "motor.m2", "motor.m3", "motor.m4")
+MOTORS: tuple[str, ...] = ("motor.m1", "motor.m2", "motor.m3", "motor.m4")
 VARIABLES = dict.fromkeys(MOTORS, "int32_t")
 
 # Frame geometry, read off how many motors answer a single-axis command.
@@ -89,24 +88,52 @@ PLUS_RATIO = 0.25        # third motor this quiet means only two are involved
 X_RATIO = 0.50           # third motor this loud means all four are
 FRAME_NAMES = {"plus": "PLUS (+)", "x": "X"}
 
+ARM_NAMES = {"f": "FRONT", "b": "BACK", "l": "LEFT", "r": "RIGHT"}
+OPPOSITES = {"f": "b", "b": "f", "l": "r", "r": "l"}
 
-def detect_frame(report) -> tuple[str | None, list[str], float]:
-    """Return (frame, motors ranked by response, third-to-first ratio).
 
-    Frame is "plus", "x", or None when the ratio lands between the two and the
-    reading cannot be trusted either way.
-    """
-    ranked = sorted(MOTORS, key=lambda m: abs(report[m]["gain"]), reverse=True)
-    strongest = abs(report[ranked[0]]["gain"])
+class MotorResponse(NamedTuple):
+    """How one motor answered the commanded angle in step 1."""
+
+    gain: float          # motor output per degree commanded, from the lag-corrected fit
+    correlation: float
+    low: float           # output range it covered
+    high: float
+
+
+Report = dict[str, MotorResponse]
+
+
+class Frame(NamedTuple):
+    kind: str | None     # "plus", "x", or None when the reading cannot be trusted
+    ranked: list[str]    # motors by response, strongest first
+    ratio: float         # third-strongest response over the strongest
+
+    @property
+    def movers(self) -> int:
+        """Motors at each end of the axis: one on a plus frame, a pair on an X."""
+        return 1 if self.kind == "plus" else 2
+
+
+def detect_frame(report: Report) -> Frame:
+    """Read the frame geometry off the ranked responses."""
+    ranked = sorted(MOTORS, key=lambda m: abs(report[m].gain), reverse=True)
+    strongest = abs(report[ranked[0]].gain)
     if strongest <= 0:
-        return None, ranked, 0.0
+        return Frame(None, ranked, 0.0)
 
-    ratio = abs(report[ranked[2]]["gain"]) / strongest
+    ratio = abs(report[ranked[2]].gain) / strongest
     if ratio < PLUS_RATIO:
-        return "plus", ranked, ratio
+        return Frame("plus", ranked, ratio)
     if ratio > X_RATIO:
-        return "x", ranked, ratio
-    return None, ranked, ratio
+        return Frame("x", ranked, ratio)
+    return Frame(None, ranked, ratio)
+
+
+def axis_ends(report: Report, movers: int) -> tuple[list[str], list[str]]:
+    """(motors driven down by a +angle, motors driven down by a -angle)."""
+    by_gain = sorted(MOTORS, key=lambda m: report[m].gain)
+    return by_gain[:movers], by_gain[-movers:]
 
 
 def drive(scf, thrust: int, schedule, axis: str = "pitch"
@@ -121,44 +148,189 @@ def drive(scf, thrust: int, schedule, axis: str = "pitch"
             Interruptible() as interrupt:
         try:
             cf.commander.send_setpoint(0, 0, 0, 0)
-            for pitch, duration in schedule:
-                start = time.time()
-                while time.time() - start < duration:
+            for angle, duration in schedule:
+                for _frac, now in ticks(duration):
                     if interrupt.requested:
                         raise KeyboardInterrupt
-                    now = time.time()
-                    if axis == "roll":
-                        cf.commander.send_setpoint(pitch, 0, 0, thrust)
-                    else:
-                        cf.commander.send_setpoint(0, pitch, 0, thrust)
-                    commands.append((now, pitch))
+                    roll, pitch = (angle, 0) if axis == "roll" else (0, angle)
+                    cf.commander.send_setpoint(roll, pitch, 0, thrust)
+                    commands.append((now, angle))
                     while taken < len(raw):
                         for motor in MOTORS:
                             series[motor].append((now, float(raw[taken][motor])))
                         taken += 1
-                    time.sleep(DT)
         finally:
             stop_motors(cf, from_thrust=thrust, dt=DT)
 
     return commands, series
 
 
-def summarise(commands, series) -> dict[str, dict]:
-    """Per-motor gain against the commanded pitch, plus the range it covered."""
+def summarise(commands, series) -> Report:
+    """Per-motor gain against the commanded angle, plus the range it covered."""
     report = {}
     for motor, samples in series.items():
         if len(samples) < 8:
             continue
         _lag, gain, correlation = best_fit(commands, samples)
         values = [value for _t, value in samples]
-        report[motor] = {
-            "gain": gain,
-            "correlation": correlation,
-            "low": min(values),
-            "high": max(values),
-            "mean": statistics.fmean(values),
-        }
+        report[motor] = MotorResponse(gain, correlation, min(values), max(values))
     return report
+
+
+def probe_axis(scf, thrust: int, pitch: float, axis: str) -> Report | None:
+    """Step 1: alternate the angle, and show how each motor answered."""
+    print(f"\nStep 1: alternating {pitch:+.0f} deg of {axis}, {CYCLES} cycles ...")
+    schedule = [(+pitch, PHASE_SECONDS), (-pitch, PHASE_SECONDS)] * CYCLES
+    report = summarise(*drive(scf, thrust, schedule, axis))
+
+    if len(report) < 4:
+        print("Not all motors reported. Power-cycle and retry.")
+        return None
+
+    print("\n  motor      gain   correlation      range")
+    for motor in MOTORS:
+        row = report[motor]
+        print(f"  {motor}  {row.gain:+8.1f}     {row.correlation:+.2f}"
+              f"      {row.low:.0f} - {row.high:.0f}")
+
+    responding = [m for m in MOTORS if abs(report[m].correlation) >= MIN_CORRELATION]
+    if len(responding) < 2:
+        print("\nThe motors do not track the command. Raise --thrust so the\n"
+              "controller has room to push, and retry.")
+        return None
+    return report
+
+
+def describe_frame(report: Report, axis: str) -> Frame | None:
+    """Say what the responses reveal about the frame; None when they do not."""
+    frame = detect_frame(report)
+    other = "roll" if axis == "pitch" else "pitch"
+    third = abs(report[frame.ranked[2]].gain)
+    first = abs(report[frame.ranked[0]].gain)
+
+    print(f"\nFrame: {FRAME_NAMES.get(frame.kind, 'UNCLEAR')}")
+    print(f"  third-strongest motor moves {frame.ratio * 100:.0f}% as much as the "
+          f"strongest ({third:.0f} against {first:.0f})")
+
+    if frame.kind is None:
+        print("\nThat is between the two patterns, so the frame cannot be\n"
+              "read from it. Raise --pitch for a cleaner separation, and\n"
+              "check the drone is sitting flat and still.")
+        return None
+    if frame.kind == "plus":
+        print(f"  two motors answer {axis}, so the arms point front, back,\n"
+              f"  left and right. {frame.ranked[0]} and {frame.ranked[1]} are the {axis}\n"
+              f"  axis; {frame.ranked[2]} and {frame.ranked[3]} are {other}.")
+    else:
+        print(f"  all four motors answer {axis}, so the arms point at the\n"
+              f"  diagonals. Each end of the {axis} axis is a PAIR.")
+    return frame
+
+
+def hold_angle(report: Report, thrust: int, pitch: float, watched: list[str],
+               noun: str) -> float:
+    """The angle to hold in step 2, predicted from step 1 to bottom the motors out.
+
+    Step 1 already showed how far the differential moves per degree, so start
+    from an angle predicted to reach zero rather than from the probing angle,
+    which demonstrably does not.
+    """
+    step1_reach = thrust - min(report[m].low for m in watched)
+    scale = thrust / max(1.0, step1_reach)
+    angle = min(MAX_PROBE_PITCH, pitch * scale * PITCH_MARGIN)
+    print(f"Step 1 moved the motors {step1_reach:.0f} of the {thrust} "
+          f"needed to reach zero,\nso holding {angle:.0f} deg rather "
+          f"than {pitch:.0f}. Base thrust stays at {thrust} so "
+          f"every\nmotor keeps turning; only the losing {noun} should stop.\n")
+    return angle
+
+
+def stop_end(scf, thrust: int, axis: str, angle: float, motors: list[str]) -> float:
+    """Hold `angle` until `motors` stop, demanding more each time they do not.
+
+    Returns the lowest output the slowest of them reached: zero means it stopped.
+    """
+    sign = 1.0 if angle > 0 else -1.0
+    stops = " and ".join(motors)
+    plural = len(motors) > 1
+    attempt = 0
+    while True:
+        attempt += 1
+        print(f"  Holding {angle:+.0f} deg for {HOLD_SECONDS:.0f}s -- "
+              f"watch for the propeller{'s' if plural else ''} that STOP{'' if plural else 'S'}.")
+        input("  Press Enter when ready: ")
+        _c, held = drive(scf, thrust, [(angle, HOLD_SECONDS)], axis)
+        worst = max(min((v for _t, v in held[m]), default=0.0) for m in motors)
+        if worst <= 0:
+            print(f"  ({stops} reached zero -- "
+                  f"{'those propellers' if plural else 'that propeller'} stopped.)")
+            return worst
+
+        harder = min(MAX_PROBE_PITCH,
+                     abs(angle) * thrust / max(1.0, thrust - worst) * PITCH_MARGIN)
+        if harder <= abs(angle) * 1.05 or attempt == MAX_ATTEMPTS:
+            print(f"  ({stops} bottomed out at {worst:.0f} and will not "
+                  f"reach zero.\n   Watch for the slowest instead.)")
+            return worst
+
+        print(f"  ({stops} only reached {worst:.0f}, still spinning. "
+              f"Demanding\n   {harder:.0f} deg instead -- watch again.)")
+        angle = sign * harder
+
+
+def which_arm(frame: Frame, layout: dict[str, str] | None, motors: list[str],
+              worst: float) -> str:
+    """The arm that stopped, from frame.json when it can say, else from you."""
+    if layout and len(motors) == 1 and worst <= 0:
+        arm = layout[motors[0]]
+        print(f"  (frame.json: {motors[0]} is the {arm} arm.)")
+        return arm[0]
+    prompt = ("  Which arm stopped?  " if frame.kind == "plus"
+              else "  Which SIDE stopped (the two adjacent arms)?  ")
+    return input(prompt + "[f] front  [b] back  [l] left  [r] right: ").strip().lower()[:1]
+
+
+def conclude(axis: str, first: str, second: str) -> None:
+    """Turn the two arm letters into the answer, and what it means for trim."""
+    names = ARM_NAMES
+    if OPPOSITES[first] != second:
+        print("\nThose two arms are not opposite each other, and the pitch\n"
+              "pair has to sit across the frame. One reading was misread --\n"
+              "run it again and watch for the propeller that stops.")
+        return
+
+    print("\nConsistent: the two arms are opposite, as the pitch axis must be.")
+
+    # Whichever arm drops on a positive pitch command is the direction a
+    # positive command sends the drone. That is the whole answer; whether
+    # it matches the arm you call the front is a separate question.
+    print(f"\n  positive {axis}  ->  drops the {names[first]} arm  ->  "
+          f"drone accelerates {names[first]}")
+    print(f"  negative {axis}  ->  drops the {names[second]} arm  ->  "
+          f"drone accelerates {names[second]}")
+
+    if first in ("l", "r"):
+        print(f"\nSo what cflib calls pitch moves this drone along its\n"
+              f"{names[first]}-{names[second]} axis, not front-back. The IMU is\n"
+              f"mounted 90 degrees from the arm you call the front, which is\n"
+              f"normal -- the frame is symmetric and the firmware picks the\n"
+              f"axis, not the paint.\n")
+        print("Two consequences worth knowing:")
+        print(f"  * fly with the {names[first]} arm leading and the controls\n"
+              f"    behave conventionally, pitch forward and roll sideways")
+        print("  * a drift along your front-back axis is a ROLL problem on\n"
+              "    this drone, so pitch trim was never going to fix it")
+        print("\nThat would explain trimming pitch making no difference.")
+    else:
+        print(f"\nSo a positive pitch command flies the drone {names[first]}.")
+        if first == "f":
+            print("A backward drift is corrected by INCREASING pitch trim.")
+            print('\n  hoptest CORRECTIONS should read  "b": ("pitch", +1)')
+        else:
+            print("A backward drift is corrected by DECREASING pitch trim.")
+            print('\n  hoptest CORRECTIONS should read  "b": ("pitch", -1)')
+
+    print("\nTell me the result and I will set it from this measurement.")
 
 
 def run(
@@ -171,11 +343,7 @@ def run(
     if axis not in ("pitch", "roll"):
         raise SystemExit("axis must be pitch or roll")
 
-    cfenv.init()
-    uri = cfenv.resolve_uri(uri)
-    print(f"Connecting to {uri} ...")
-    with cfenv.connect(uri) as scf:
-        scf.wait_for_params()
+    with cfenv.session(uri) as scf:
         print("Connected.\n")
 
         print("The propellers will spin, at a thrust far too low to lift.")
@@ -185,62 +353,15 @@ def run(
             print("Nothing done.")
             return
 
-        # Step 1: alternate, to find which pair is the pitch axis.
-        print(f"\nStep 1: alternating {pitch:+.0f} deg of {axis}, {CYCLES} cycles ...")
-        schedule = []
-        for _ in range(CYCLES):
-            schedule.append((+pitch, PHASE_SECONDS))
-            schedule.append((-pitch, PHASE_SECONDS))
-        commands, series = drive(scf, thrust, schedule, axis)
-        report = summarise(commands, series)
-
-        if len(report) < 4:
-            print("Not all motors reported. Power-cycle and retry.")
+        report = probe_axis(scf, thrust, pitch, axis)
+        if report is None:
             return
-
-        print("\n  motor      gain   correlation      range")
-        for motor in MOTORS:
-            row = report[motor]
-            print(f"  {motor}  {row['gain']:+8.1f}     {row['correlation']:+.2f}"
-                  f"      {row['low']:.0f} - {row['high']:.0f}")
-
-        responding = [m for m in MOTORS
-                      if abs(report[m]["correlation"]) >= MIN_CORRELATION]
-        if len(responding) < 2:
-            print("\nThe motors do not track the command. Raise --thrust so the\n"
-                  "controller has room to push, and retry.")
-            return
-
-        frame, ranked, ratio = detect_frame(report)
-        other = "roll" if axis == "pitch" else "pitch"
-        third = abs(report[ranked[2]]["gain"])
-        first = abs(report[ranked[0]]["gain"])
-
-        print(f"\nFrame: {FRAME_NAMES.get(frame, 'UNCLEAR')}")
-        print(f"  third-strongest motor moves {ratio * 100:.0f}% as much as the "
-              f"strongest ({third:.0f} against {first:.0f})")
-
+        frame = describe_frame(report, axis)
         if frame is None:
-            print("\nThat is between the two patterns, so the frame cannot be\n"
-                  "read from it. Raise --pitch for a cleaner separation, and\n"
-                  "check the drone is sitting flat and still.")
             return
 
-        if frame == "plus":
-            print(f"  two motors answer {axis}, so the arms point front, back,\n"
-                  f"  left and right. {ranked[0]} and {ranked[1]} are the {axis}\n"
-                  f"  axis; {ranked[2]} and {ranked[3]} are {other}.")
-            movers = 1
-        else:
-            print(f"  all four motors answer {axis}, so the arms point at the\n"
-                  f"  diagonals. Each end of the {axis} axis is a PAIR.")
-            movers = 2
-
-        by_gain = sorted(MOTORS, key=lambda m: report[m]["gain"])
-        low_on_plus = by_gain[:movers]          # driven down by +angle
-        low_on_minus = by_gain[-movers:]        # driven down by -angle
-
-        if report[low_on_plus[0]]["gain"] * report[low_on_minus[0]]["gain"] > 0:
+        low_on_plus, low_on_minus = axis_ends(report, frame.movers)
+        if report[low_on_plus[0]].gain * report[low_on_minus[0]].gain > 0:
             print("\nThe motors all moved the same way, which is thrust rather\n"
                   f"than {axis}. Raise --{axis} or --thrust and retry.")
             return
@@ -249,116 +370,25 @@ def run(
         # something you can actually see; which is merely slower is not.
         # Asking about both ends cross-checks the answer, since the pitch pair
         # must sit across the frame from one another.
-        noun = "arm" if frame == "plus" else "pair of arms"
+        noun = "arm" if frame.kind == "plus" else "pair of arms"
         print(f"\nStep 2: identifying the two ends of the {axis} axis.")
         print("Answers are relative to the drone's own front, as you know it.\n")
+        angle = hold_angle(report, thrust, pitch, low_on_plus + low_on_minus, noun)
 
-        # Step 1 already showed how far the differential moves per degree, so
-        # start from an angle predicted to bottom the motors out rather than
-        # from the probing angle, which demonstrably does not.
-        watched = low_on_plus + low_on_minus
-        step1_reach = thrust - min(report[m]["low"] for m in watched)
-        scale = thrust / max(1.0, step1_reach)
-        hold_pitch = min(MAX_PROBE_PITCH, pitch * scale * PITCH_MARGIN)
-        print(f"Step 1 moved the motors {step1_reach:.0f} of the {thrust} "
-              f"needed to reach zero,\nso holding {hold_pitch:.0f} deg rather "
-              f"than {pitch:.0f}. Base thrust stays at {thrust} so "
-              f"every\nmotor keeps turning; only the losing {noun} should stop.\n")
-
-        frame_layout = load_frame()
-        seen = {}
+        layout = load_frame()
+        answers = []
         for sign, motors in ((+1.0, low_on_plus), (-1.0, low_on_minus)):
-            angle = sign * hold_pitch
-            for attempt in range(MAX_ATTEMPTS):
-                stops = " and ".join(motors)
-                print(f"  Holding {angle:+.0f} deg for {HOLD_SECONDS:.0f}s -- "
-                      f"watch for the propeller{'s' if len(motors) > 1 else ''} "
-                      f"that STOP{'' if len(motors) > 1 else 'S'}.")
-                input("  Press Enter when ready: ")
-                _c, held = drive(scf, thrust, [(angle, HOLD_SECONDS)], axis)
-                floors = {m: min((v for _t, v in held[m]), default=0.0)
-                          for m in motors}
-                worst = max(floors.values())
-                if worst <= 0:
-                    print(f"  ({stops} reached zero -- "
-                          f"{'those propellers' if len(motors) > 1 else 'that propeller'} "
-                          f"stopped.)")
-                    break
-
-                harder = min(MAX_PROBE_PITCH,
-                             abs(angle) * thrust / max(1.0, thrust - worst)
-                             * PITCH_MARGIN)
-                if harder <= abs(angle) * 1.05 or attempt == MAX_ATTEMPTS - 1:
-                    print(f"  ({stops} bottomed out at {worst:.0f} and will not "
-                          f"reach zero.\n   Watch for the slowest instead.)")
-                    break
-
-                print(f"  ({stops} only reached {worst:.0f}, still spinning. "
-                      f"Demanding\n   {harder:.0f} deg instead -- watch again.)")
-                angle = sign * harder
-
-            if frame_layout and len(motors) == 1 and worst <= 0:
-                answer = frame_layout[motors[0]][0]
-                print(f"  (frame.json: {motors[0]} is the {frame_layout[motors[0]]} arm.)")
-            else:
-                prompt = ("  Which arm stopped?  " if frame == "plus"
-                          else "  Which SIDE stopped (the two adjacent arms)?  ")
-                answer = input(prompt + "[f] front  [b] back  "
-                               "[l] left  [r] right: ").strip().lower()[:1]
-            if answer not in ("f", "b", "l", "r"):
+            worst = stop_end(scf, thrust, axis, sign * angle, motors)
+            answer = which_arm(frame, layout, motors, worst)
+            if answer not in ARM_NAMES:
                 print("\n  Not a recognised answer. Re-run and watch again.")
                 return
-            seen[tuple(motors)] = answer
-            print()
+            plural = len(motors) > 1
+            print(f"  {' and '.join(motors)} {'are' if plural else 'is'} "
+                  f"the {ARM_NAMES[answer]} {'arms' if plural else 'arm'}\n")
+            answers.append(answer)
 
-        names = {"f": "FRONT", "b": "BACK", "l": "LEFT", "r": "RIGHT"}
-        opposites = {"f": "b", "b": "f", "l": "r", "r": "l"}
-        first, second = seen[tuple(low_on_plus)], seen[tuple(low_on_minus)]
-
-        for motors, where in seen.items():
-            label = "arm" if len(motors) == 1 else "arms"
-            print(f"  {' and '.join(motors)} {'is' if len(motors) == 1 else 'are'} "
-                  f"the {names[where]} {label}")
-
-        if opposites[first] != second:
-            print("\nThose two arms are not opposite each other, and the pitch\n"
-                  "pair has to sit across the frame. One reading was misread --\n"
-                  "run it again and watch for the propeller that stops.")
-            return
-
-        print("\nConsistent: the two arms are opposite, as the pitch axis must be.")
-
-        # Whichever arm drops on a positive pitch command is the direction a
-        # positive command sends the drone. That is the whole answer; whether
-        # it matches the arm you call the front is a separate question.
-        print(f"\n  positive {axis}  ->  drops the {names[first]} arm  ->  "
-              f"drone accelerates {names[first]}")
-        print(f"  negative {axis}  ->  drops the {names[second]} arm  ->  "
-              f"drone accelerates {names[second]}")
-
-        if first in ("l", "r"):
-            print(f"\nSo what cflib calls pitch moves this drone along its\n"
-                  f"{names[first]}-{names[second]} axis, not front-back. The IMU is\n"
-                  f"mounted 90 degrees from the arm you call the front, which is\n"
-                  f"normal -- the frame is symmetric and the firmware picks the\n"
-                  f"axis, not the paint.\n")
-            print("Two consequences worth knowing:")
-            print(f"  * fly with the {names[first]} arm leading and the controls\n"
-                  f"    behave conventionally, pitch forward and roll sideways")
-            print("  * a drift along your front-back axis is a ROLL problem on\n"
-                  "    this drone, so pitch trim was never going to fix it")
-            print("\nThat would explain trimming pitch making no difference.")
-        else:
-            forward = "f" if first == "f" else "b"
-            print(f"\nSo a positive pitch command flies the drone {names[forward]}.")
-            if first == "f":
-                print("A backward drift is corrected by INCREASING pitch trim.")
-                print('\n  hoptest CORRECTIONS should read  "b": ("pitch", +1)')
-            else:
-                print("A backward drift is corrected by DECREASING pitch trim.")
-                print('\n  hoptest CORRECTIONS should read  "b": ("pitch", -1)')
-
-        print("\nTell me the result and I will set it from this measurement.")
+        conclude(axis, *answers)
 
 
 if __name__ == "__main__":

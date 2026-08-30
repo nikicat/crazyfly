@@ -34,13 +34,14 @@ from flight import (
     MAX_THRUST,
     MAX_YAW_RATE,
     MIN_THRUST,
+    QUIT_KEYS,
     THRUST_STEP,
     TRIM_FILE,
-    TRIM_LIMIT,
     VBAT_CRITICAL,
     Gamepad,
     Interruptible,
     Keyboard,
+    Trim,
     clamp,
     heading,
     load_mag_offset,
@@ -50,6 +51,7 @@ from flight import (
 )
 
 TRIM_STEP = 0.2          # degrees per keypress, live in the air
+TRIM_KEYS = {"[": ("roll", -1), "]": ("roll", +1), ";": ("pitch", -1), "'": ("pitch", +1)}
 
 KEYBOARD_HELP = """\
   w / s     thrust up / down     arrows   roll and pitch     a / d   yaw
@@ -61,7 +63,6 @@ GAMEPAD_HELP = """\
   B            cut thrust              D-pad         trim roll / pitch  View     reset trim
   A            height hold on/off (then left stick climbs / sinks)   Menu / q  land and quit
   Y            roll flip -- battery above flip.min_vbat (config.json), two metres of air"""
-QUIT_KEYS = {"q", "ESC"}  # the gamepad's Menu button arrives as "q"
 
 # Height hold, firmware 2017.06: with flightmode.althold set the thrust word is
 # a climb rate instead -- HOLD_CENTRE holds, full scale is 1 m/s either way --
@@ -113,6 +114,272 @@ def wait_for_link(uri: str, inp, interrupt: Interruptible):
     return None
 
 
+class Session:
+    """One connection's worth of flying: the state the loop mutates, and its steps.
+
+    A new one is made each time the drone is (re)connected; trim carries over
+    from the previous one. fly() runs the loop and always lands on the way out.
+    """
+
+    def __init__(self, scf, trim: Trim, mag_offset, gamepad: bool) -> None:
+        self.scf = scf
+        self.cf = scf.cf
+        self.trim = trim
+        self.mag_offset = mag_offset
+        self.gamepad = gamepad
+        self.has_hold = "flightmode" in self.cf.param.toc.toc
+        self.has_mag = mag_offset is not None and "mag" in self.cf.log.toc.toc
+
+        self.thrust = 0.0
+        self.roll = self.pitch = self.yaw_rate = self.climb = 0.0
+        self.hold = False
+        self.link_lost = False
+        self.battery: list[dict] = []          # the 2 Hz log, newest last
+
+        self.flip: flipping.Flip | None = None
+        self._flip_log = None                  # the gyro recorder, open during a flip
+        self._gyro: list[dict] = []
+        self._fed = 0                          # gyro samples already fed to the flip
+
+    # --- firmware modes -------------------------------------------------------
+
+    def set_hold(self, on: bool) -> None:
+        self.cf.param.set_value(ALTHOLD, "1" if on else "0")
+        self.hold = on
+
+    def set_rate_mode(self, on: bool) -> None:
+        for axis in ("stabModeRoll", "stabModePitch"):
+            self.cf.param.set_value(f"flightmode.{axis}", "0" if on else "1")
+
+    def prepare(self) -> None:
+        """Clear modes left over from a previous session and unlock the commander."""
+        # Height hold survives a link loss but not a reboot, and with it on
+        # even a zero setpoint spins the motors at the firmware's thrustMin.
+        # Clear it before the first setpoint goes out.
+        if self.has_hold:
+            self.set_hold(False)
+            self.set_rate_mode(False)       # a session that died mid-flip leaves RATE set
+            time.sleep(0.2)
+        # A zero setpoint unlocks the commander; the firmware refuses thrust
+        # until it has seen one.
+        self.cf.commander.send_setpoint(0, 0, 0, 0)
+
+    def log_variables(self) -> dict[str, str]:
+        """Battery at 2 Hz, plus height and the compass where the firmware has them."""
+        variables = {"pm.vbat": "float"}
+        if self.has_hold:
+            variables[Z_LOG] = "float"
+        if self.has_mag:
+            variables.update(MAG_LOGS)      # 24 of the packet's 26 bytes, all in
+        return variables
+
+    @property
+    def vbat(self) -> float | None:
+        return self.battery[-1]["pm.vbat"] if self.battery else None
+
+    # --- one-shot keys --------------------------------------------------------
+
+    def toggle_hold(self) -> None:
+        if self.hold:
+            self.set_hold(False)
+        elif not self.has_hold:
+            print("\nThis firmware has no height hold.", flush=True)
+        elif self.thrust > MIN_THRUST:
+            # The thrust you hover at is the best hover estimate there is,
+            # battery sag included; the firmware's I term trims the rest.
+            self.cf.param.set_value(THRUST_BASE, str(int(self.thrust)))
+            self.set_hold(True)
+        else:
+            print("\nTake off first, then hold.", flush=True)
+
+    def start_flip(self) -> None:
+        vbat = self.vbat or 0.0
+        if not self.has_hold:
+            print("\nThis firmware has no rate mode; no flip.", flush=True)
+        elif self.thrust <= MIN_THRUST:
+            print("\nTake off first, then flip.", flush=True)
+        elif vbat < flipping.MIN_VBAT:
+            print(f"\nBattery {vbat:.2f} V is under {flipping.MIN_VBAT} V; "
+                  "no margin to catch a flip.", flush=True)
+        else:
+            if self.hold:
+                self.set_hold(False)
+            self._flip_log = cfenv.record_log(self.scf, {"gyro.x": "float"}, period_ms=10)
+            self._gyro = self._flip_log.__enter__()
+            self._fed = 0
+            self.flip = flipping.Flip(self.set_rate_mode, time.time())
+
+    def end_flip(self) -> None:
+        if self._flip_log is not None:
+            self._flip_log.__exit__(None, None, None)
+        self.set_rate_mode(False)
+        self.flip = self._flip_log = None
+
+    def cut(self) -> None:
+        if self.hold:
+            self.set_hold(False)
+        if self.flip is not None:
+            self.end_flip()
+        self.thrust = 0.0
+
+    def handle_keys(self, events: list[str]) -> None:
+        if "h" in events:
+            self.toggle_hold()
+        if "f" in events and self.flip is None:
+            self.start_flip()
+        if " " in events:
+            self.cut()
+        # Trim steps on discrete presses, not on hold, so a leaned-on key
+        # cannot run the offset away while you are flying.
+        for key in events:
+            if key in TRIM_KEYS:
+                axis, sign = TRIM_KEYS[key]
+                self.trim = self.trim.nudge(axis, sign * TRIM_STEP)
+            elif key == "0":
+                self.trim = Trim()
+
+    # --- sticks ---------------------------------------------------------------
+
+    def read_sticks(self, inp) -> None:
+        if self.gamepad:
+            self.read_gamepad(inp)
+        else:
+            self.read_keyboard(inp)
+        # The firmware ignores thrust at or below MIN_THRUST; below it means
+        # motors off on either input.
+        self.thrust = 0.0 if self.thrust < MIN_THRUST else self.thrust
+
+    def read_gamepad(self, inp: Gamepad) -> None:
+        # Sticks spring back on their own, so no decay. The left stick is a
+        # throttle: centre is motors off, thrust grows with how far up it is
+        # pushed. It follows the stick up at once but comes down no faster
+        # than the landing ramp, so letting go is a descent rather than a drop.
+        self.climb = inp.axis("thrust")
+        if not self.hold:               # holding: manual thrust waits for release
+            target = MAX_THRUST * max(0.0, self.climb)
+            self.thrust = max(target, self.thrust - THRUST_STEP)
+        self.roll = MAX_ANGLE * inp.axis("roll")
+        self.pitch = MAX_ANGLE * inp.axis("pitch")
+        self.yaw_rate = MAX_YAW_RATE * (inp.trigger("yaw_right") - inp.trigger("yaw_left"))
+
+    def read_keyboard(self, inp: Keyboard) -> None:
+        self.climb = KEY_CLIMB if inp.down("w") else -KEY_CLIMB if inp.down("s") else 0.0
+        if self.hold:
+            pass                        # manual thrust waits for release
+        elif inp.down("w"):
+            self.thrust = clamp(self.thrust + THRUST_STEP, MIN_THRUST, MAX_THRUST)
+        elif inp.down("s"):
+            self.thrust -= THRUST_STEP
+        self.roll = held_axis(inp, "left", "right", self.roll, MAX_ANGLE)
+        # Positive pitch drops the front motor and flies forward, measured
+        # with motorcheck.py, so up is positive. It was the other way round,
+        # which flew the drone backwards when you pressed up.
+        self.pitch = held_axis(inp, "down", "up", self.pitch, MAX_ANGLE)
+        self.yaw_rate = held_axis(inp, "a", "d", self.yaw_rate, MAX_YAW_RATE)
+
+    # --- output ---------------------------------------------------------------
+
+    def send(self) -> None:
+        """One setpoint: the sticks plus trim, or whatever a flip in progress wants."""
+        word = HOLD_CENTRE + HOLD_SPAN * self.climb if self.hold else self.thrust
+        trim = self.trim
+        if self.flip is not None:
+            self.flip.feed([s["gyro.x"] for s in self._gyro[self._fed:]], 0.01)
+            self._fed = len(self._gyro)
+            command = self.flip.tick(time.time())
+            if command is None:
+                self.end_flip()         # the stick has thrust again next tick
+            else:
+                self.roll, self.pitch, self.yaw_rate, word = command
+                trim = Trim()
+        self.cf.commander.send_setpoint(self.roll + trim.roll, self.pitch + trim.pitch,
+                                        self.yaw_rate, int(word))
+
+    def status(self) -> str:
+        bar = "#" * int(20 * self.thrust / MAX_THRUST)
+        vbat = self.vbat
+        bat = "?" if vbat is None else f"{vbat:.2f}V{' LOW' if vbat < VBAT_CRITICAL else ''}"
+        z = hdg = ""
+        if self.has_hold and self.battery:
+            z = f"z {self.battery[-1][Z_LOG] - self.battery[0][Z_LOG]:+.2f}m"
+        if self.has_mag and self.battery:
+            last = self.battery[-1]
+            degrees = heading(last["mag.x"], last["mag.y"], last["mag.z"],
+                              last["stabilizer.roll"], last["stabilizer.pitch"],
+                              self.mag_offset)
+            hdg = f"hdg {degrees:3.0f}"
+        mode = (f"FLIP {self.flip.phase} {self.flip.turned:4.0f}" if self.flip is not None
+                else f"HOLD {self.climb:+.1f}" if self.hold else "")
+        return (f"\r{int(self.thrust):>6} {bar:<20} "
+                f"roll {self.roll:+5.1f} pitch {self.pitch:+5.1f} yaw {self.yaw_rate:+6.1f}  "
+                f"trim {self.trim.roll:+.1f}/{self.trim.pitch:+.1f}  bat {bat:<9} "
+                f"{z:<9} {hdg:<8} {mode:<9}")
+
+    # --- the loop -------------------------------------------------------------
+
+    def step(self, inp, interrupt: Interruptible) -> bool:
+        """One tick: read input, send a setpoint, redraw. False when it is time to land."""
+        try:
+            events = inp.poll()
+        except OSError as err:
+            print(f"\n{err} -- landing.", flush=True)
+            return False
+        if QUIT_KEYS & set(events) or interrupt.requested:
+            return False
+        if not self.scf.is_link_open():
+            # cflib gives up after ~100 lost acks: the drone powered off (flat
+            # battery, idle timeout) or rebooted on USB. Nothing is left to
+            # land, and setpoints into the void would just look like flying.
+            print("\nLink lost -- the drone powered off or rebooted.", flush=True)
+            self.thrust = 0.0
+            self.link_lost = True
+            return False
+        self.handle_keys(events)
+        self.read_sticks(inp)
+        self.send()
+        print(self.status(), end="", flush=True)
+        return True
+
+    def land(self) -> None:
+        """Ramp down with the trim still applied, then stop the motors for good.
+
+        The drone is flying during this descent and would drift without trim.
+        stop_motors finishes the job and ignores Ctrl-C, so it cannot be left
+        half done.
+        """
+        if self.flip is not None and not self.link_lost:
+            self.end_flip()             # back to angle mode before the ramp
+        if self.hold and not self.link_lost:
+            self.set_hold(False)        # the ramp below sends thrust, not climb rate
+            time.sleep(0.2)
+        try:
+            while self.thrust > MIN_THRUST:
+                self.thrust = max(MIN_THRUST, self.thrust - THRUST_STEP)
+                self.cf.commander.send_setpoint(self.trim.roll, self.trim.pitch, 0,
+                                                int(self.thrust))
+                time.sleep(DT)
+        except KeyboardInterrupt:
+            pass                        # second Ctrl-C: skip the gentle descent
+        stop_motors(self.cf, from_thrust=self.thrust, step=THRUST_STEP, dt=DT)
+        self.scf.close_link()
+
+    def fly(self, inp, interrupt: Interruptible) -> None:
+        """Run the loop until quit, Ctrl-C or a lost link; always lands on the way out."""
+        self.prepare()
+        # One small log packet every half second costs the 250K link nothing
+        # next to 33 setpoints/s.
+        with cfenv.record_log(self.scf, self.log_variables(), period_ms=500) as battery:
+            self.battery = battery
+            try:
+                while True:
+                    loop_start = time.time()
+                    if not self.step(inp, interrupt):
+                        break
+                    time.sleep(max(0.0, DT - (time.time() - loop_start)))
+            finally:
+                self.land()
+
+
 def run(
     roll_trim: float | None = None,
     pitch_trim: float | None = None,
@@ -121,10 +388,9 @@ def run(
 ) -> None:
     """Manual keyboard or gamepad flight, with persistent trim."""
 
-    saved_roll, saved_pitch = load_trim()
+    saved = load_trim()
+    trim = saved.override(roll_trim, pitch_trim)
     mag_offset = load_mag_offset()
-    roll_trim = saved_roll if roll_trim is None else roll_trim
-    pitch_trim = saved_pitch if pitch_trim is None else pitch_trim
 
     if gamepad and not Path(JS_DEVICE).exists():
         sys.exit(f"No gamepad at {JS_DEVICE}. Press the Xbox button to wake it, then retry.")
@@ -133,7 +399,7 @@ def run(
     uri = cfenv.resolve_uri(uri)
 
     print(GAMEPAD_HELP if gamepad else KEYBOARD_HELP)
-    print(f"Trim: roll {roll_trim:+.1f}, pitch {pitch_trim:+.1f} deg"
+    print(f"Trim: roll {trim.roll:+.1f}, pitch {trim.pitch:+.1f} deg"
           f"{' (trim.json)' if TRIM_FILE.exists() else ''}")
 
     # Input and Ctrl-C handling outlive any one connection: whether the drone
@@ -145,229 +411,18 @@ def run(
             Interruptible() as interrupt:
         scf = wait_for_link(uri, inp, interrupt)
         while scf is not None:
-            cf = scf.cf
             scf.wait_for_params()
-            has_hold = "flightmode" in cf.param.toc.toc
-            has_mag = mag_offset is not None and "mag" in cf.log.toc.toc
-
-            thrust = 0.0
-            roll = pitch = yaw_rate = climb = 0.0
-            link_lost = hold = False
-
-            def set_hold(on: bool, cf=cf) -> None:      # cf bound per connection
-                nonlocal hold
-                cf.param.set_value(ALTHOLD, "1" if on else "0")
-                hold = on
-
-            def set_rate_mode(on: bool, cf=cf) -> None:
-                for axis in ("stabModeRoll", "stabModePitch"):
-                    cf.param.set_value(f"flightmode.{axis}", "0" if on else "1")
-
-            flip = None
-            flip_log = None
-            fed = 0
-
-            def end_flip() -> None:
-                nonlocal flip, flip_log
-                if flip_log is not None:
-                    flip_log.__exit__(None, None, None)
-                set_rate_mode(False)
-                flip = flip_log = None
-
-            # Height hold survives a link loss but not a reboot, and with it
-            # on even a zero setpoint spins the motors at the firmware's
-            # thrustMin. Clear it before the first setpoint goes out.
-            if has_hold:
-                set_hold(False)
-                set_rate_mode(False)        # a session that died mid-flip leaves RATE set
-                time.sleep(0.2)
-
-            # A zero setpoint unlocks the commander; the firmware refuses thrust
-            # until it has seen one.
-            cf.commander.send_setpoint(0, 0, 0, 0)
-
-            # Battery voltage rides along at 2 Hz: one small log packet every
-            # half second costs the 250K link nothing next to 33 setpoints/s.
-            variables = {"pm.vbat": "float"}
-            if has_hold:
-                variables[Z_LOG] = "float"
-            if has_mag:
-                variables.update(MAG_LOGS)      # 24 of the packet's 26 bytes, all in
-            with cfenv.record_log(scf, variables, period_ms=500) as battery:
-                try:
-                    while True:
-                        loop_start = time.time()
-                        try:
-                            events = inp.poll()
-                        except OSError as err:
-                            print(f"\n{err} -- landing.", flush=True)
-                            break
-                        if QUIT_KEYS & set(events) or interrupt.requested:
-                            break
-                        if not scf.is_link_open():
-                            # cflib gives up after ~100 lost acks: the drone
-                            # powered off (flat battery, idle timeout) or
-                            # rebooted on USB. Nothing is left to land, and
-                            # setpoints into the void would just look like
-                            # flying.
-                            print("\nLink lost -- the drone powered off or rebooted.",
-                                  flush=True)
-                            thrust = 0.0
-                            link_lost = True
-                            break
-                        if "h" in events:
-                            if hold:
-                                set_hold(False)
-                            elif not has_hold:
-                                print("\nThis firmware has no height hold.", flush=True)
-                            elif thrust > MIN_THRUST:
-                                # The thrust you hover at is the best hover
-                                # estimate there is, battery sag included; the
-                                # firmware's I term trims the rest.
-                                cf.param.set_value(THRUST_BASE, str(int(thrust)))
-                                set_hold(True)
-                            else:
-                                print("\nTake off first, then hold.", flush=True)
-                        if "f" in events and flip is None:
-                            vbat = battery[-1]["pm.vbat"] if battery else 0.0
-                            if not has_hold:
-                                print("\nThis firmware has no rate mode; no flip.", flush=True)
-                            elif thrust <= MIN_THRUST:
-                                print("\nTake off first, then flip.", flush=True)
-                            elif vbat < flipping.MIN_VBAT:
-                                print(f"\nBattery {vbat:.2f} V is under {flipping.MIN_VBAT} V; "
-                                      "no margin to catch a flip.", flush=True)
-                            else:
-                                if hold:
-                                    set_hold(False)
-                                flip_log = cfenv.record_log(scf, {"gyro.x": "float"}, period_ms=10)
-                                gyro = flip_log.__enter__()
-                                fed = 0
-                                flip = flipping.Flip(set_rate_mode, time.time())
-                        if " " in events:
-                            if hold:
-                                set_hold(False)
-                            if flip is not None:
-                                end_flip()
-                            thrust = 0.0
-
-                        if gamepad:
-                            # Sticks spring back on their own, so no decay.
-                            # The left stick is a throttle: centre is motors
-                            # off, thrust grows with how far up it is pushed.
-                            # It follows the stick up at once but comes down
-                            # no faster than the landing ramp, so letting go
-                            # is a descent rather than a drop.
-                            climb = inp.axis("thrust")
-                            if not hold:    # holding: manual thrust waits for release
-                                target = MAX_THRUST * max(0.0, climb)
-                                thrust = max(target, thrust - THRUST_STEP)
-                            roll = MAX_ANGLE * inp.axis("roll")
-                            pitch = MAX_ANGLE * inp.axis("pitch")
-                            yaw_rate = MAX_YAW_RATE * (inp.trigger("yaw_right")
-                                                       - inp.trigger("yaw_left"))
-                        else:
-                            climb = (KEY_CLIMB if inp.down("w")
-                                     else -KEY_CLIMB if inp.down("s") else 0.0)
-                            if hold:
-                                pass        # manual thrust waits for release
-                            elif inp.down("w"):
-                                thrust = clamp(thrust + THRUST_STEP, MIN_THRUST, MAX_THRUST)
-                            elif inp.down("s"):
-                                thrust -= THRUST_STEP
-                            roll = held_axis(inp, "left", "right", roll, MAX_ANGLE)
-                            # Positive pitch drops the front motor and flies
-                            # forward, measured with motorcheck.py, so up is
-                            # positive. It was the other way round, which
-                            # flew the drone backwards when you pressed up.
-                            pitch = held_axis(inp, "down", "up", pitch, MAX_ANGLE)
-                            yaw_rate = held_axis(inp, "a", "d", yaw_rate, MAX_YAW_RATE)
-                        # The firmware ignores thrust at or below MIN_THRUST;
-                        # below it means motors off on either input.
-                        thrust = 0.0 if thrust < MIN_THRUST else thrust
-
-                        # Trim steps on discrete presses, not on hold, so a
-                        # leaned-on key cannot run the offset away while you
-                        # are flying.
-                        for key in events:
-                            if key == "[":
-                                roll_trim = clamp(roll_trim - TRIM_STEP, -TRIM_LIMIT, TRIM_LIMIT)
-                            elif key == "]":
-                                roll_trim = clamp(roll_trim + TRIM_STEP, -TRIM_LIMIT, TRIM_LIMIT)
-                            elif key == ";":
-                                pitch_trim = clamp(pitch_trim - TRIM_STEP, -TRIM_LIMIT, TRIM_LIMIT)
-                            elif key == "'":
-                                pitch_trim = clamp(pitch_trim + TRIM_STEP, -TRIM_LIMIT, TRIM_LIMIT)
-                            elif key == "0":
-                                roll_trim = pitch_trim = 0.0
-
-                        word = HOLD_CENTRE + HOLD_SPAN * climb if hold else thrust
-                        trim_r, trim_p = roll_trim, pitch_trim
-                        if flip is not None:
-                            flip.feed([s["gyro.x"] for s in gyro[fed:]], 0.01)
-                            fed = len(gyro)
-                            command = flip.tick(time.time())
-                            if command is None:
-                                end_flip()          # the stick has thrust again next tick
-                            else:
-                                roll, pitch, yaw_rate, word = command
-                                trim_r = trim_p = 0.0
-                        cf.commander.send_setpoint(roll + trim_r, pitch + trim_p,
-                                                   yaw_rate, int(word))
-
-                        bar = "#" * int(20 * thrust / MAX_THRUST)
-                        vbat = battery[-1]["pm.vbat"] if battery else None
-                        bat = ("?" if vbat is None else
-                               f"{vbat:.2f}V{' LOW' if vbat < VBAT_CRITICAL else ''}")
-                        z = ""
-                        if has_hold and battery:
-                            z = f"z {battery[-1][Z_LOG] - battery[0][Z_LOG]:+.2f}m"
-                        hdg = ""
-                        if has_mag and battery:
-                            last = battery[-1]
-                            degrees = heading(last["mag.x"], last["mag.y"], last["mag.z"],
-                                              last["stabilizer.roll"], last["stabilizer.pitch"],
-                                              mag_offset)
-                            hdg = f"hdg {degrees:3.0f}"
-                        mode = (f"FLIP {flip.phase} {flip.turned:4.0f}" if flip is not None
-                                else f"HOLD {climb:+.1f}" if hold else "")
-                        print(f"\r{int(thrust):>6} {bar:<20} "
-                              f"roll {roll:+5.1f} pitch {pitch:+5.1f} yaw {yaw_rate:+6.1f}  "
-                              f"trim {roll_trim:+.1f}/{pitch_trim:+.1f}  bat {bat:<9} "
-                              f"{z:<9} {hdg:<8} {mode:<9}",
-                              end="", flush=True)
-
-                        time.sleep(max(0.0, DT - (time.time() - loop_start)))
-                finally:
-                    # Ramp down rather than cutting instantly. Keep the trim
-                    # applied while there is still thrust: the drone is flying
-                    # during this descent and would drift without it.
-                    # stop_motors then finishes the job, and ignores Ctrl-C so
-                    # it cannot be left half done.
-                    if flip is not None and not link_lost:
-                        end_flip()          # back to angle mode before the ramp
-                    if hold and not link_lost:
-                        set_hold(False)     # the ramp below sends thrust, not climb rate
-                        time.sleep(0.2)
-                    try:
-                        while thrust > MIN_THRUST:
-                            thrust = max(MIN_THRUST, thrust - THRUST_STEP)
-                            cf.commander.send_setpoint(roll_trim, pitch_trim, 0,
-                                                       int(thrust))
-                            time.sleep(DT)
-                    except KeyboardInterrupt:
-                        pass        # second Ctrl-C: skip the gentle descent
-                    stop_motors(cf, from_thrust=thrust, step=THRUST_STEP, dt=DT)
-                    scf.close_link()
-
-            if not link_lost:
+            session = Session(scf, trim, mag_offset, gamepad)
+            session.fly(inp, interrupt)
+            trim = session.trim
+            if not session.link_lost:
                 print("\nLanded, motors stopped.")
                 break
             scf = wait_for_link(uri, inp, interrupt)
 
-    if (roll_trim, pitch_trim) != (saved_roll, saved_pitch):
-        save_trim(roll_trim, pitch_trim)
-        print(f"Trim saved: roll {roll_trim:+.1f}, pitch {pitch_trim:+.1f}")
+    if trim != saved:
+        save_trim(*trim)
+        print(f"Trim saved: roll {trim.roll:+.1f}, pitch {trim.pitch:+.1f}")
 
 
 if __name__ == "__main__":

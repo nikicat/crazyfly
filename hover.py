@@ -38,11 +38,7 @@ def run(
 ) -> None:
     """Autonomous takeoff, hover and land. Requires a Flow deck."""
 
-    cfenv.init()
-    uri = cfenv.resolve_uri(uri)
-
-    print(f"Connecting to {uri} ...")
-    with cfenv.connect(uri) as scf:
+    with cfenv.session(uri) as scf:
         cf = scf.cf
 
         if cf.platform.get_protocol_version() < 0:
