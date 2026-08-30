@@ -38,6 +38,9 @@ problem -- worth knowing before trimming the wrong axis.
 SAFETY: the propellers spin. Put the drone on a flat surface, hands clear. It
 cannot lift at this thrust but it may skitter, so hold it by the battery.
 
+If frame.json says which arm each motor is on, the arm that stopped is named
+from the motor that reached zero instead of asking you to spot it.
+
   uv run motorcheck.py
 """
 from __future__ import annotations
@@ -48,7 +51,7 @@ import time
 import typer
 
 import cfenv
-from flight import DT, Interruptible, stop_motors
+from flight import DT, Interruptible, load_frame, stop_motors
 from signals import best_fit
 
 PROBE_PITCH = 20.0       # degrees; deliberately unreachable, to saturate output
@@ -262,6 +265,7 @@ def run(
               f"than {pitch:.0f}. Base thrust stays at {thrust} so "
               f"every\nmotor keeps turning; only the losing {noun} should stop.\n")
 
+        frame_layout = load_frame()
         seen = {}
         for sign, motors in ((+1.0, low_on_plus), (-1.0, low_on_minus)):
             angle = sign * hold_pitch
@@ -293,10 +297,14 @@ def run(
                       f"Demanding\n   {harder:.0f} deg instead -- watch again.)")
                 angle = sign * harder
 
-            prompt = ("  Which arm stopped?  " if frame == "plus"
-                      else "  Which SIDE stopped (the two adjacent arms)?  ")
-            answer = input(prompt + "[f] front  [b] back  "
-                           "[l] left  [r] right: ").strip().lower()[:1]
+            if frame_layout and len(motors) == 1 and worst <= 0:
+                answer = frame_layout[motors[0]][0]
+                print(f"  (frame.json: {motors[0]} is the {frame_layout[motors[0]]} arm.)")
+            else:
+                prompt = ("  Which arm stopped?  " if frame == "plus"
+                          else "  Which SIDE stopped (the two adjacent arms)?  ")
+                answer = input(prompt + "[f] front  [b] back  "
+                               "[l] left  [r] right: ").strip().lower()[:1]
             if answer not in ("f", "b", "l", "r"):
                 print("\n  Not a recognised answer. Re-run and watch again.")
                 return

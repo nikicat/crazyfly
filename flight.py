@@ -39,6 +39,8 @@ TRIM_LIMIT = 10.0        # refuse to trim past this; beyond it something is bent
 VBAT_CRITICAL = 3.4      # volts; land now. Full is ~4.2, sags a few tenths under load
 TRIM_FILE = Path(__file__).with_name("trim.json")
 MAG_FILE = Path(__file__).with_name("mag.json")    # hard-iron offset from `cf.py mag --save`
+FRAME_FILE = Path(__file__).with_name("frame.json")  # which arm each motor is on
+ARMS = ("front", "right", "back", "left")
 
 JS_DEVICE = "/dev/input/js0"
 JS_DEADZONE = 0.15       # stick centre wobble below this reads as neutral
@@ -73,6 +75,17 @@ def load_mag_offset() -> tuple[float, float, float] | None:
         return float(saved["x"]), float(saved["y"]), float(saved["z"])
     except (OSError, ValueError, KeyError):
         return None
+
+
+def load_frame() -> dict[str, str] | None:
+    """Motor name -> arm, e.g. {"m1": "front", ...}; None unless all four are placed."""
+    try:
+        frame = {str(k): str(v) for k, v in json.loads(FRAME_FILE.read_text()).items()}
+    except (OSError, ValueError, AttributeError):
+        return None
+    if set(frame) != {"m1", "m2", "m3", "m4"} or sorted(frame.values()) != sorted(ARMS):
+        return None
+    return frame
 
 
 def save_mag_offset(x: float, y: float, z: float) -> None:

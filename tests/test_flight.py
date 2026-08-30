@@ -246,6 +246,18 @@ def test_unanswered_version_request_falls_back_to_legacy(monkeypatch):
     assert done == [3]
 
 
+# --- frame layout ---------------------------------------------------------
+
+def test_frame_layout_needs_all_four_arms(tmp_path, monkeypatch):
+    path = tmp_path / "frame.json"
+    monkeypatch.setattr(flight, "FRAME_FILE", path)
+    assert flight.load_frame() is None                       # no file
+    path.write_text('{"m1": "front", "m2": "right", "m3": "back", "m4": "left"}')
+    assert flight.load_frame() == {"m1": "front", "m2": "right", "m3": "back", "m4": "left"}
+    path.write_text('{"m1": "front", "m2": "front", "m3": "back", "m4": "left"}')
+    assert flight.load_frame() is None                       # an arm named twice
+
+
 # --- magnetic heading -----------------------------------------------------
 
 def test_heading_is_level_corrected_and_offset_free():

@@ -279,8 +279,11 @@ A positive pitch command drives m1 to a standstill, so the front drops and the
 drone flies **forward**. A backward drift therefore needs **more** pitch trim,
 and up-arrow in `teleop.py` sends positive pitch.
 
-Roll has not been measured the same way — run `motorcheck.py --axis roll`
-before trusting its sign.
+Roll measured the same way on 2017.06: m2 and m4 answer it, m2 dropping on
+a positive command. Where each motor sits is in `frame.json` -- m1 front, m2
+right, m3 back, m4 left, read off the connectors -- so `motorcheck.py` names
+the arm that stopped from the log instead of asking you to spot it. With that
+layout, positive roll drops the right arm: stick right goes right.
 
 ### Which way is front
 
