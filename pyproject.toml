@@ -7,6 +7,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "cflib==0.1.33",
+    "numpy>=2",          # cflib pulls it in anyway; declared because we import it
     "typer>=0.27.1",
 ]
 

@@ -28,8 +28,6 @@ from __future__ import annotations
 import sys
 import time
 
-import typer
-
 import cfenv
 from flight import MAX_THRUST, QUIT_KEYS, Keyboard, clamp
 
@@ -135,4 +133,4 @@ def run(motor: int = 1, uri: str | None = None) -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

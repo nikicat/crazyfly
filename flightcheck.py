@@ -31,8 +31,6 @@ from __future__ import annotations
 import math
 import statistics
 
-import typer
-
 import cfenv
 from flight import (
     DT,
@@ -191,8 +189,7 @@ def run(
     base = load_trim().override(roll_trim, pitch_trim)
 
     with cfenv.session(uri) as scf:
-        vbat = statistics.fmean(
-            cfenv.sample_series(scf, {"pm.vbat": "float"}, count=3)["pm.vbat"])
+        vbat = cfenv.vbat(scf)
         print(f"Connected. Battery {vbat:.2f} V")
 
         rest = cfenv.sample_series(scf, VARIABLES, count=10)
@@ -223,4 +220,4 @@ def run(
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

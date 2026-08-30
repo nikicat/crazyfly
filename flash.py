@@ -24,7 +24,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import typer
 from cflib.bootloader import Bootloader, FlashArtifact, Target
 from cflib.bootloader.boottypes import TargetTypes
 
@@ -88,4 +87,4 @@ def run(firmware: Path | None = None, backup: Path = BACKUP) -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

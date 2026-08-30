@@ -25,8 +25,6 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
-import typer
-
 import cfenv
 import flightlog
 import flip as flipping
@@ -675,4 +673,4 @@ def run(
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

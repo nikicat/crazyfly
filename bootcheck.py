@@ -18,7 +18,6 @@ reflash: flash.py does that, backup first.
 """
 from __future__ import annotations
 
-import typer
 from cflib.bootloader import Bootloader
 from cflib.bootloader.boottypes import BootVersion
 
@@ -62,4 +61,4 @@ def run() -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

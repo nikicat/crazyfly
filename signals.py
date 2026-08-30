@@ -11,8 +11,8 @@ confident "188% of a possible" answer at the edge of the search range.
 """
 from __future__ import annotations
 
-import math
 import statistics
+from bisect import bisect_right
 
 MIN_PAIRS = 8            # fewer paired samples than this cannot support a fit
 MAX_LAG = 0.6            # a real link delay is a few hundred ms
@@ -22,22 +22,14 @@ LAG_STEP = 0.02
 def paired_at_lag(commands, samples, lag: float
                   ) -> tuple[list[float], list[float]]:
     """Pair each sample with the lean commanded `lag` earlier."""
+    times = [stamp for stamp, _ in commands]
     commanded: list[float] = []
     measured: list[float] = []
-    if not commands:
-        return commanded, measured
-
-    index = 0
-    for stamp, pitch in samples:
+    for stamp, value in samples:
         target = stamp - lag
-        if target < commands[0][0] or target > commands[-1][0]:
-            continue        # outside the commanded window; nothing to pair with
-        while index + 1 < len(commands) and commands[index + 1][0] <= target:
-            index += 1
-        while index > 0 and commands[index][0] > target:
-            index -= 1
-        commanded.append(commands[index][1])
-        measured.append(pitch)
+        if times and times[0] <= target <= times[-1]:
+            commanded.append(commands[bisect_right(times, target) - 1][1])
+            measured.append(value)
     return commanded, measured
 
 
@@ -55,21 +47,11 @@ def fit_at_lag(commands, samples, lag: float) -> tuple[float, float] | None:
     commanded, measured = paired_at_lag(commands, samples, lag)
     if len(commanded) < MIN_PAIRS:
         return None
-    if len({round(value, 6) for value in commanded}) < 2:
-        return None         # only one lean represented; nothing to correlate
-
-    mean_c = statistics.fmean(commanded)
-    mean_m = statistics.fmean(measured)
-    var_c = sum((c - mean_c) ** 2 for c in commanded)
-    var_m = sum((m - mean_m) ** 2 for m in measured)
-    if var_c <= 0 or var_m <= 0:
-        return None
-
-    covariance = sum((c - mean_c) * (m - mean_m)
-                     for c, m in zip(commanded, measured, strict=True))
-    correlation = covariance / math.sqrt(var_c * var_m)
-    gain = covariance / var_c
-    return correlation, gain
+    try:
+        correlation = statistics.correlation(commanded, measured)
+    except statistics.StatisticsError:
+        return None          # one side is constant; nothing to correlate
+    return correlation, statistics.linear_regression(commanded, measured).slope
 
 
 def best_fit(commands, samples) -> tuple[float, float, float]:

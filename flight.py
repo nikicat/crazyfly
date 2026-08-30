@@ -20,6 +20,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
+import numpy as np
+
 # A 250K link tops out around 35 setpoints/s once each send blocks on its ack,
 # so asking for 50 Hz just means the sleep never fires. Pace to what the link
 # can actually carry, which keeps the thrust ramp rate predictable.
@@ -199,10 +201,7 @@ def charge(rest: float) -> float:
     is the number a pilot actually wants. Feed it a voltage smoothed over a
     second or two; the raw samples jitter by a few hundredths.
     """
-    for (v0, p0), (v1, p1) in zip(CURVE, CURVE[1:], strict=False):
-        if rest <= v1:
-            return clamp(p0 + (p1 - p0) * (rest - v0) / (v1 - v0), 0.0, 100.0)
-    return 100.0
+    return float(np.interp(rest, [v for v, _ in CURVE], [p for _, p in CURVE]))
 
 
 def heading(mx: float, my: float, mz: float, roll: float, pitch: float,

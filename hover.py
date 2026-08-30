@@ -12,7 +12,6 @@ from __future__ import annotations
 import sys
 import time
 
-import typer
 from cflib.crazyflie import Crazyflie
 from cflib.positioning.motion_commander import MotionCommander
 
@@ -63,4 +62,4 @@ def run(
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

@@ -13,7 +13,6 @@ main MCU that is off, hung, or unflashed.
 """
 from __future__ import annotations
 
-import typer
 from cflib.drivers.crazyradio import Crazyradio
 
 import cfenv
@@ -156,4 +155,4 @@ def run(
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

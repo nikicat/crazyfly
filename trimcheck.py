@@ -24,8 +24,6 @@ import sys
 import time
 from collections import deque
 
-import typer
-
 import cfenv
 
 SAMPLES = 50          # at 100 ms -> about 5 seconds
@@ -214,4 +212,4 @@ def run(
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

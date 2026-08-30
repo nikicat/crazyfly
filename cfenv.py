@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import logging
 import os
+import statistics
 import sys
 from contextlib import contextmanager
 from threading import Event
 
 import cflib.crtp
+import typer
 from cflib.crazyflie import Crazyflie
 from cflib.crazyflie.log import LogConfig
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
@@ -247,6 +249,13 @@ def sample_series(scf, variables: dict[str, str], count: int,
     return series
 
 
+def vbat(scf, count: int = 3) -> float:
+    """Mean pack voltage over `count` samples. Raises LinkLost if telemetry
+    stops, rather than returning 0.0 and tripping a low-battery check for the
+    wrong reason."""
+    return statistics.fmean(sample_series(scf, {"pm.vbat": "float"}, count)["pm.vbat"])
+
+
 BUSY_MESSAGE = """\
 The Crazyradio is already in use by another process.
 
@@ -259,6 +268,11 @@ prompt keeps every other one locked out. Find it with:
 If it is an interactive script such as hoptest.py, switch to its terminal and
 quit it properly -- that saves your trim. Killing it discards any trim you
 adjusted in that session."""
+
+
+def cli(entry) -> None:
+    """The scripts' shared footer: a typer CLI around `entry`, run through run()."""
+    run(lambda: typer.run(entry))
 
 
 def run(entry) -> None:

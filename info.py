@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import statistics
 
-import typer
-
 import cfenv
 from flight import VBAT_CRITICAL
 
@@ -82,4 +80,4 @@ def run(uri: str | None = None) -> None:
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

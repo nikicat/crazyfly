@@ -22,8 +22,6 @@ import sys
 import time
 from pathlib import Path
 
-import typer
-
 import cfenv
 from flight import MAG_FILE, save_mag_offset
 
@@ -90,4 +88,4 @@ def run(seconds: float = 30.0, out: Path = Path("mag.csv"), save: bool = False,
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

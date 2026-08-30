@@ -47,8 +47,6 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import typer
-
 import cfenv
 from flight import DT, Interruptible, load_frame, stop_motors, ticks
 from signals import best_fit
@@ -392,4 +390,4 @@ def run(
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)

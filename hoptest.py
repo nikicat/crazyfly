@@ -20,12 +20,9 @@ fine-tuning it, which is the part that genuinely needs flight.
 """
 from __future__ import annotations
 
-import statistics
 import sys
 import time
 from collections import deque
-
-import typer
 
 import cfenv
 from flight import (
@@ -69,13 +66,6 @@ CORRECTIONS = {
     "f": ("pitch", -1),
     "b": ("pitch", +1),
 }
-
-
-def battery(scf) -> float:
-    """Current pack voltage. Raises LinkLost if telemetry stops, rather than
-    returning 0.0 and tripping the low-battery check for the wrong reason."""
-    series = cfenv.sample_series(scf, {"pm.vbat": "float"}, count=3)
-    return statistics.fmean(series["pm.vbat"])
 
 
 def hop(cf, thrust: int, hold: float, trim: Trim) -> str:
@@ -174,7 +164,7 @@ def run(
     trim = (Trim() if reset_trim else load_trim()).override(roll_trim, pitch_trim)
 
     with cfenv.session(uri) as scf:
-        vbat = battery(scf)
+        vbat = cfenv.vbat(scf)
         print(f"Connected. Battery {vbat:.2f} V\n")
         if vbat < 3.6:
             sys.exit("Battery too low for a meaningful hop -- it will need more\n"
@@ -246,4 +236,4 @@ def run(
 
 
 if __name__ == "__main__":
-    cfenv.run(lambda: typer.run(run))
+    cfenv.cli(run)
