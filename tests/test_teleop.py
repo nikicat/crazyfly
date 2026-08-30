@@ -1,13 +1,17 @@
 """teleop: the keyboard mapping and the flight loop, flown off-line."""
 from __future__ import annotations
 
+import csv
 import inspect
 import math
+from contextlib import nullcontext
 
 import pytest
 from conftest import FakeCrazyflie, descends_monotonically
 
+import cfenv
 import flight
+import flightlog
 import teleop
 
 
@@ -210,3 +214,27 @@ def test_height_mode_takes_off_holds_and_lands_by_reference():
     tick(ref, teleop.FW_THRUST_MIN, now=1.5)       # ...now it has: landed
     assert not session.hold and session.thrust == 0 and session.ref_z == ref
     assert params[teleop.ALTHOLD] == "0" and session.hover == pytest.approx(41000)
+
+
+def test_flight_is_recorded_a_row_per_tick_with_the_log_beside_it(tmp_path, monkeypatch):
+    """Every setpoint leaves a cmd row -- with the trim folded in, as sent -- and
+    each log sample a row of its own, once, however many ticks it sits there."""
+    sample = {"ts": 1234, "pm.vbat": 3.9}
+    monkeypatch.setattr(cfenv, "record_log", lambda *_a, **_k: nullcontext([dict(sample)]))
+    path = tmp_path / "flight.csv"
+    with flightlog.Recorder(path, teleop.COLUMNS) as recorder:
+        session = teleop.Session(fake_scf(FakeCrazyflie()), flight.Trim(0.5, -1.0),
+                                 mag_offset=None, gamepad=False, recorder=recorder)
+        session.fly(ScriptedInput(("w", 3), ("q", 1)), flight.Interruptible())
+    with path.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    cmd = [r for r in rows if r["src"] == "cmd"]
+    assert len(cmd) == 3 and recorder.rows == 4
+    assert [r["thrust"] for r in cmd] == [str(flight.MIN_THRUST + i * flight.THRUST_STEP)
+                                          for i in range(3)]
+    assert cmd[0]["roll"] == "0.5" and cmd[0]["pitch"] == "-1.0" and cmd[0]["hold"] == "0"
+    assert cmd[0]["ref_z"] == "" and cmd[0]["flip"] == ""
+    log = [r for r in rows if r["src"] == "log"]
+    assert len(log) == 1 and log[0]["ts"] == "1234" and log[0]["pm.vbat"] == "3.9"
+    assert log[0]["roll"] == "" and float(log[0]["t"]) >= float(cmd[0]["t"])

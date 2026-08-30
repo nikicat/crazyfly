@@ -105,6 +105,7 @@ identical either way and `uv run hoptest.py --thrust 42000` still works.
 | `mag` | `maglog.py` | Record the magnetometer to a CSV, with attitude, thrust and battery |
 | `teleop` | `teleop.py` | Manual keyboard flight, with persistent trim |
 | `hover` | `hover.py` | Autonomous takeoff, hover and land. Requires a Flow deck |
+| `plot` | `flightlog.py` | Render a flight recording as an interactive page, the newest by default |
 | `trim` | `trimcheck.py` | Diagnose drift: gyro bias, sensor offset, or mechanical |
 | `hop` | `hoptest.py` | Bounded indoor hops that converge on a trim setting |
 | `orient` | `orient.py` | Work out which arm of the drone is the front, by tilting it |
@@ -287,6 +288,35 @@ becomes a flag the flight loop checks (`flight.Interruptible`), and the drone
 descends through its normal ramp. A second Ctrl-C skips the gentle descent.
 `flight.stop_motors` ignores SIGINT entirely for the second it runs — the stop
 sequence is the one thing that must never be left half finished.
+
+### Flight recordings
+
+Every teleop run is recorded to `data/flights/<stamp>.csv` and, on exit,
+rendered beside it as `<stamp>.html` -- an offline page in the style of a
+Grafana dashboard: one cursor across every panel with the legend reading the
+values under it, drag to zoom them all together, double-click to zoom back
+out, click a legend entry to hide a series. Open it in any browser;
+`uv run cf.py plot [file]` renders one again, the newest by default.
+
+The panels are mode (hold, height mode, flip phase), height (`estimatedZ`
+against the reference, vertical speed against the climb rate asked for),
+thrust (the word sent, what the firmware drove, the four motors, battery),
+roll, pitch (command against attitude, with the gyro rate) and yaw (rate
+against gyro, heading against the reference). What a firmware or a flight did
+not record is left out rather than drawn empty.
+
+The CSV holds three streams told apart by `src`, each row with its own `t`
+(seconds since the run started) and the other streams' columns blank: `cmd`
+at 33 Hz is what went out and the state behind it (trim folded in, reference
+height and heading, mode, flip phase); `log` is the 10 Hz block the height and
+heading loops fly on; `dyn` is a second 20 Hz block for how the drone answered
+-- yaw, gyro, motors, vertical acceleration and speed, 20 of a packet's 26
+bytes. Log rows also carry `ts`, the firmware's millisecond clock, since their
+`t` is when the tick drained them, up to 30 ms late. Rows are flushed as
+written, so a flight that ends in a crash or a second Ctrl-C is still whole in
+the file. The page is [uPlot](https://github.com/leeoniya/uPlot), the engine
+behind Grafana's time-series panel, vendored as `uplot.min.js` / `.css` and
+inlined into each page.
 
 ### Fixing drift
 

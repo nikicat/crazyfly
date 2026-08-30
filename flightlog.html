@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>flight</title>
+<style>__CSS__</style>
+<style>
+  body { margin: 0; padding: 12px 20px; background: #111217; color: #ccccdc;
+         font: 13px system-ui, sans-serif; }
+  h1 { font-size: 16px; font-weight: 500; margin: 0 0 8px; }
+  h1 small { color: #8e8e9e; margin-left: 1em; font-weight: 400; }
+  .uplot { margin-bottom: 4px; }
+  .u-title { color: #ccccdc; font-size: 13px; font-weight: 500; text-align: left; padding-left: 60px; }
+  .u-legend { color: #ccccdc; }
+  .u-legend .u-value { min-width: 5em; text-align: right; }
+</style>
+</head>
+<body>
+<h1 id="title"></h1>
+<script>__JS__</script>
+<script>
+const DATA = __DATA__;
+const D = DATA.columns, CATS = DATA.cats;
+
+// One row per panel: left-axis series, right-axis series. Whatever this
+// firmware or flight did not record is simply left out.
+const PANELS = [
+  {title: "mode", height: 100, step: true, left: ["hold", "height_mode", "flip"]},
+  {title: "height  m | m/s", left: ["posEstimatorAlt.estimatedZ", "ref_z"],
+                            right: ["posEstimatorAlt.estVZ", "climb"]},
+  {title: "thrust | V", left: ["thrust", "stabilizer.thrust",
+                               "motor.m1", "motor.m2", "motor.m3", "motor.m4"],
+                        right: ["pm.vbat"]},
+  {title: "roll  deg | deg/s", left: ["roll", "stabilizer.roll"], right: ["gyro.x"]},
+  {title: "pitch  deg | deg/s", left: ["pitch", "stabilizer.pitch"], right: ["gyro.y"]},
+  {title: "yaw  deg/s | deg", left: ["yaw_rate", "gyro.z"], right: ["hdg", "ref_hdg"]},
+];
+const COLORS = ["#7eb26d", "#eab839", "#6ed0e0", "#ef843c", "#e24d42", "#1f78c1", "#ba43a9", "#705da0"];
+const AXIS = {stroke: "#8e8e9e", grid: {stroke: "#26272e"}, ticks: {stroke: "#26272e"}};
+
+const has = c => c in D && D[c].some(v => v != null);
+const width = () => document.body.clientWidth - 40;
+const value = c => (u, v) => v == null ? "" : CATS[c] ? CATS[c][v - 1]
+                             : Number.isInteger(v) ? v : v.toFixed(2);
+const charts = [];
+
+// The legend reads the nearest sample of each series rather than blank on the
+// rows where a slower stream has none: streams share one time axis.
+function nearest(u, si, idx) {
+  const ys = u.data[si];
+  for (let d = 0; d < 40; d++) {
+    if (ys[idx + d] != null) return idx + d;
+    if (ys[idx - d] != null) return idx - d;
+  }
+  return idx;
+}
+
+// Drag-zoom on one panel zooms them all; double-click resets through the same hook.
+function syncX(u, key) {
+  if (key !== "x") return;
+  const {min, max} = u.scales.x;
+  for (const c of charts)
+    if (c !== u && (c.scales.x.min !== min || c.scales.x.max !== max))
+      c.setScale("x", {min, max});
+}
+
+const n = (D.t || []).length;
+document.getElementById("title").innerHTML =
+  `${DATA.name} <small>${n} rows, ${n ? D.t[n - 1].toFixed(1) : 0} s</small>`;
+
+for (const p of PANELS) {
+  const left = (p.left || []).filter(has), right = (p.right || []).filter(has);
+  const cols = [...left, ...right];
+  if (!cols.length) continue;
+  const series = [{label: "t", value: (u, v) => v == null ? "" : v.toFixed(2) + " s"}, ...cols.map((c, i) => ({
+    label: c, stroke: COLORS[i % COLORS.length], width: 1.5, spanGaps: true,
+    scale: i < left.length ? "l" : "r", value: value(c),
+    paths: p.step ? uPlot.paths.stepped({align: 1}) : undefined,
+  }))];
+  const axes = [{...AXIS}, {...AXIS, scale: "l", size: 60}];
+  if (right.length) axes.push({...AXIS, scale: "r", side: 1, size: 60, grid: {show: false}});
+  const el = document.createElement("div");
+  document.body.appendChild(el);
+  charts.push(new uPlot({
+    title: p.title, width: width(), height: p.height || 200,
+    scales: {x: {time: false}}, series, axes,
+    cursor: {sync: {key: "flight"}, drag: {x: true, y: false}, dataIdx: nearest},
+    hooks: {setScale: [syncX]},
+  }, [D.t, ...cols.map(c => D[c])], el));
+}
+window.addEventListener("resize", () =>
+  charts.forEach(c => c.setSize({width: width(), height: c.height})));
+</script>
+</body>
+</html>

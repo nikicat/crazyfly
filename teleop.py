@@ -28,6 +28,7 @@ from pathlib import Path
 import typer
 
 import cfenv
+import flightlog
 import flip as flipping
 from flight import (
     DECAY,
@@ -98,6 +99,20 @@ MAG_LOGS = {"mag.x": "float", "mag.y": "float", "mag.z": "float",
             "stabilizer.roll": "FP16", "stabilizer.pitch": "FP16"}
 KEY_CLIMB = 0.5          # fraction of the full climb rate while w / s is held
 
+# The flight recording (flightlog.py): one row of what went out and the state
+# behind it every tick, and a second log block for how the drone answered.
+# ponytail: 20 Hz is untested on the air. A flip streams gyro.x at 100 Hz for
+# a moment, so the acks should carry it beside the 10 Hz block; if a recording
+# shows fewer than 20 dyn rows a second, the link is dropping them -- use 100 ms.
+DYN_LOGS = {"stabilizer.yaw": "FP16", "gyro.x": "FP16", "gyro.y": "FP16", "gyro.z": "FP16",
+            "motor.m1": "uint16_t", "motor.m2": "uint16_t",
+            "motor.m3": "uint16_t", "motor.m4": "uint16_t",
+            "acc.z": "FP16", "posEstimatorAlt.estVZ": "FP16"}     # 20 of the packet's 26 bytes
+DYN_PERIOD_MS = 50
+CMD_FIELDS = ["roll", "pitch", "yaw_rate", "thrust", "trim_roll", "trim_pitch", "climb",
+              "ref_z", "ref_hdg", "hdg", "hold", "height_mode", "flip"]
+COLUMNS = [*CMD_FIELDS, "pm.vbat", Z_LOG, FW_THRUST_LOG, *MAG_LOGS, *DYN_LOGS]
+
 # Heading hold. The firmware already turns the yaw stick into a held angle
 # (controller_pid.c integrates the rate into a yaw setpoint the attitude PID
 # tracks), but on the gyro alone, which wanders ~6 deg/min. With the compass
@@ -155,12 +170,14 @@ class Session:
     """
 
     def __init__(self, scf, trim: Trim, mag_offset, gamepad: bool,
-                 hover: float | None = None) -> None:
+                 hover: float | None = None,
+                 recorder: flightlog.Recorder | None = None) -> None:
         self.scf = scf
         self.cf = scf.cf
         self.trim = trim
         self.mag_offset = mag_offset
         self.gamepad = gamepad
+        self.recorder = recorder
         self.has_hold = "flightmode" in self.cf.param.toc.toc
         self.has_mag = mag_offset is not None and "mag" in self.cf.log.toc.toc
 
@@ -175,6 +192,8 @@ class Session:
         self.ref_hdg: float | None = None      # compass heading being held, if any
         self.link_lost = False
         self.battery: list[dict] = []          # the 10 Hz log, newest last
+        self.dyn: list[dict] = []              # the recording's 20 Hz log
+        self._taken = {"log": 0, "dyn": 0}     # samples of each already recorded
 
         self.flip: flipping.Flip | None = None
         self._flip_log = None                  # the gyro recorder, open during a flip
@@ -228,6 +247,11 @@ class Session:
         if self.has_mag:
             variables.update(MAG_LOGS)      # fills the packet's 26 bytes exactly
         return variables
+
+    def dyn_variables(self) -> dict[str, str]:
+        """DYN_LOGS, less whatever groups this firmware does not have."""
+        groups = self.cf.log.toc.toc
+        return {name: ctype for name, ctype in DYN_LOGS.items() if name.split(".")[0] in groups}
 
     @property
     def vbat(self) -> float | None:
@@ -450,8 +474,31 @@ class Session:
             else:
                 self.roll, self.pitch, self.yaw_rate, word = command
                 trim = Trim()
-        self.cf.commander.send_setpoint(self.roll + trim.roll, self.pitch + trim.pitch,
-                                        self.yaw_rate, int(word))
+        roll, pitch, thrust = self.roll + trim.roll, self.pitch + trim.pitch, int(word)
+        self.cf.commander.send_setpoint(roll, pitch, self.yaw_rate, thrust)
+        self.record(roll, pitch, self.yaw_rate, thrust)
+
+    def record(self, roll: float, pitch: float, yaw_rate: float, thrust: int) -> None:
+        """One cmd row: what just went out and the state behind it; then the log so far."""
+        if self.recorder is None:
+            return
+        self.recorder.write("cmd", {
+            "roll": roll, "pitch": pitch, "yaw_rate": yaw_rate, "thrust": thrust,
+            "trim_roll": self.trim.roll, "trim_pitch": self.trim.pitch, "climb": self.climb,
+            "ref_z": self.ref_z, "ref_hdg": self.ref_hdg, "hdg": self.hdg,
+            "hold": self.hold, "height_mode": self.height_mode,
+            "flip": None if self.flip is None else self.flip.phase})
+        self.drain()
+
+    def drain(self) -> None:
+        """Record the log samples that have arrived since the last drain."""
+        if self.recorder is None:
+            return
+        for src, samples in (("log", self.battery), ("dyn", self.dyn)):
+            new = samples[self._taken[src]:]     # sliced first: the rx thread keeps appending
+            self._taken[src] += len(new)
+            for sample in new:
+                self.recorder.write(src, sample)
 
     def status(self) -> str:
         thrust = (self.fw_thrust or 0.0) if self.hold else self.thrust
@@ -529,8 +576,11 @@ class Session:
         self.prepare()
         # Ten small log packets a second ride down in the setpoint acks and
         # cost the 250K link nothing; the height loop wants the fresh sample.
-        with cfenv.record_log(self.scf, self.log_variables(), period_ms=100) as battery:
-            self.battery = battery
+        dyn = self.dyn_variables() if self.recorder else {}
+        with cfenv.record_log(self.scf, self.log_variables(), period_ms=100) as battery, \
+                (cfenv.record_log(self.scf, dyn, period_ms=DYN_PERIOD_MS) if dyn
+                 else nullcontext([])) as dyn_samples:
+            self.battery, self.dyn = battery, dyn_samples
             try:
                 while True:
                     loop_start = time.time()
@@ -539,6 +589,7 @@ class Session:
                     time.sleep(max(0.0, DT - (time.time() - loop_start)))
             finally:
                 self.land()
+                self.drain()                # the samples from the ramp down
 
 
 def run(
@@ -570,11 +621,12 @@ def run(
     # The keyboard stays live under the gamepad too, so q, ESC and space work
     # either way.
     with Keyboard() as kb, (Gamepad(keyboard=kb) if gamepad else nullcontext(kb)) as inp, \
-            Interruptible() as interrupt:
+            Interruptible() as interrupt, \
+            flightlog.Recorder(flightlog.new_path(), COLUMNS) as recorder:
         scf = wait_for_link(uri, inp, interrupt)
         while scf is not None:
             scf.wait_for_params()
-            session = Session(scf, trim, mag_offset, gamepad, hover)
+            session = Session(scf, trim, mag_offset, gamepad, hover, recorder)
             session.fly(inp, interrupt)
             trim = session.trim
             hover = session.learned_hover() or hover
@@ -589,6 +641,10 @@ def run(
     if hover is not None and hover != saved_hover:
         save_hover(hover)
         print(f"Hover thrust saved: {hover:.0f}")
+    if recorder.rows:
+        print(f"Flight recorded: {recorder.path} -> {flightlog.render(recorder.path)}")
+    else:
+        recorder.path.unlink()          # never got off the ground: nothing to look at
 
 
 if __name__ == "__main__":

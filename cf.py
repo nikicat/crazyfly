@@ -18,6 +18,7 @@ import bootcheck
 import cfenv
 import flash
 import flightcheck
+import flightlog
 import hover
 import info
 import linkcheck
@@ -50,6 +51,7 @@ app.command("mag", help=maglog.run.__doc__)(maglog.run)
 # --- flying it ------------------------------------------------------------
 app.command("teleop", help=teleop.run.__doc__)(teleop.run)
 app.command("hover", help=hover.run.__doc__)(hover.run)
+app.command("plot", help=flightlog.run.__doc__)(flightlog.run)
 
 # --- working out the drift ------------------------------------------------
 app.command("trim", help=trimcheck.run.__doc__)(trimcheck.run)

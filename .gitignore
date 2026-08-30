@@ -13,3 +13,6 @@ data/cache/
 *.bin
 !data/firmware-backup.bin
 *.csv
+
+# Flight recordings: a CSV and its page per teleop run.
+data/flights/

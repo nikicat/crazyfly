@@ -216,12 +216,13 @@ def record_log(scf, variables: dict[str, str], period_ms: int = 50):
     """Record log samples into a list in the background while you do something.
 
     Unlike stream_log this does not block, so telemetry can be captured during
-    a flight rather than instead of one.
+    a flight rather than instead of one. Each sample carries the firmware's
+    millisecond clock as "ts" beside the variables.
     """
     samples: list[dict] = []
     config = _start_log(scf, "record", variables, period_ms)
     config.data_received_cb.add_callback(
-        lambda _ts, data, _cfg: samples.append(dict(data)))
+        lambda ts, data, _cfg: samples.append({"ts": ts, **data}))
     config.start()
     try:
         yield samples
