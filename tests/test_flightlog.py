@@ -5,6 +5,9 @@ import csv
 import json
 import re
 
+import pytest
+
+import flight
 import flightlog
 
 
@@ -31,3 +34,24 @@ def test_recording_and_page(tmp_path):
     assert data["columns"]["roll"] == [1.2346, None, 1]
     assert data["columns"]["flip"] == [None, None, 1] and data["cats"] == {"flip": ["spin"]}
     assert "src" not in data["columns"] and len(data["columns"]["t"]) == 3
+
+
+def test_render_derives_charge_and_unwraps_headings(tmp_path):
+    """The page gets a charge column from the log (sag-corrected when the
+    firmware drives the motors) and headings continuous across the 0/360 seam,
+    with ref_hdg snapped into the same revolution."""
+    path = tmp_path / "f.csv"
+    with flightlog.Recorder(path, ["hdg", "ref_hdg", "pm.vbat", "stabilizer.thrust"]) as rec:
+        rec.write("log", {"pm.vbat": 3.75, "stabilizer.thrust": 0})
+        rec.write("log", {"pm.vbat": 3.75 - flight.BATTERY_SAG, "stabilizer.thrust": 40000})
+        for hdg in (350.0, 358.0, 2.0, 10.0, 350.0):
+            rec.write("cmd", {"hdg": hdg, "ref_hdg": 5.0})
+    html = flightlog.render(path).read_text()
+    data = json.loads(re.search(r"const DATA = (.*?);\n", html).group(1))
+
+    assert data["columns"]["charge"][0] == pytest.approx(flight.charge(3.75, False), abs=0.1)
+    # smoothing mixes both samples; the sag is added back while airborne
+    smoothed = (3.75 + 3.75 - flight.BATTERY_SAG) / 2
+    assert data["columns"]["charge"][1] == pytest.approx(flight.charge(smoothed, True), abs=0.1)
+    assert data["columns"]["hdg"][2:] == [350.0, 358.0, 362.0, 370.0, 350.0]
+    assert data["columns"]["ref_hdg"][2:] == [365.0] * 5      # one revolution up, with hdg

@@ -25,11 +25,12 @@ import csv
 import json
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import typer
 
-from flight import DATA
+from flight import DATA, charge
 
 FLIGHTS = DATA / "flights"
 HERE = Path(__file__).parent
@@ -121,9 +122,57 @@ def load(path: Path) -> tuple[dict[str, list], dict[str, list[str]]]:
     return columns, categories
 
 
+def add_charge(columns: dict[str, list]) -> None:
+    """A percent-charge column derived from the log, so old recordings get it too.
+
+    The same estimate as teleop's status line: vbat smoothed over the last 20
+    log samples, sag-corrected while the firmware is driving the motors.
+    """
+    vbats = columns.get("pm.vbat")
+    if not vbats or not any(v is not None for v in vbats):
+        return
+    thrusts = columns.get("stabilizer.thrust") or [None] * len(vbats)
+    recent: deque[float] = deque(maxlen=20)
+    series: list[float | None] = []
+    for vbat, thrust in zip(vbats, thrusts, strict=True):
+        if vbat is None:
+            series.append(None)
+            continue
+        recent.append(vbat)
+        series.append(round(charge(sum(recent) / len(recent), bool(thrust)), 1))
+    columns["charge"] = series
+
+
+def unwrap_headings(columns: dict[str, list]) -> None:
+    """Plot hdg continuously past the 0/360 seam, and ref_hdg in its revolution.
+
+    A flight that crosses the seam draws a full-height jump for a one-degree
+    turn; adding +-360 at each crossing keeps the line continuous (the page
+    shows the compass value mod 360 in the legend). ref_hdg is snapped to
+    whichever revolution puts it nearest the heading it is steering.
+    """
+    hdgs, refs = columns.get("hdg"), columns.get("ref_hdg")
+    if not hdgs:
+        return
+    offset, previous = 0.0, None
+    for i, value in enumerate(hdgs):
+        if value is not None:
+            if previous is not None:
+                step = value - previous
+                offset += -360.0 if step > 180 else 360.0 if step < -180 else 0.0
+            previous = value
+            hdgs[i] = value + offset
+        gone = previous + offset if previous is not None else None
+        anchor = hdgs[i] if value is not None else gone
+        if refs and refs[i] is not None and anchor is not None:
+            refs[i] += 360.0 * round((anchor - refs[i]) / 360.0)
+
+
 def render(path: Path) -> Path:
     """Write the page for `path` beside it, and return where."""
     columns, categories = load(path)
+    add_charge(columns)
+    unwrap_headings(columns)
     payload = {"name": path.stem, "columns": columns, "cats": categories}
     page = (TEMPLATE.read_text()
             .replace("__DATA__", json.dumps(payload).replace("</", "<\\/"))

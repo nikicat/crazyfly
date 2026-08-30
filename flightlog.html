@@ -25,7 +25,8 @@ const D = DATA.columns, CATS = DATA.cats;
 // One row per panel: left-axis series, right-axis series. Whatever this
 // firmware or flight did not record is simply left out.
 const PANELS = [
-  {title: "mode", height: 100, step: true, left: ["hold", "height_mode", "flip"]},
+  {title: "mode | bat %", height: 100, step: true,
+   left: ["hold", "height_mode", "flip"], right: ["charge"]},
   {title: "height  m | m/s", left: ["posEstimatorAlt.estimatedZ", "ref_z"],
                             right: ["posEstimatorAlt.estVZ", "climb"]},
   {title: "thrust | V", left: ["thrust", "stabilizer.thrust",
@@ -40,7 +41,9 @@ const AXIS = {stroke: "#8e8e9e", grid: {stroke: "#26272e"}, ticks: {stroke: "#26
 
 const has = c => c in D && D[c].some(v => v != null);
 const width = () => document.body.clientWidth - 40;
+const WRAPPED = new Set(["hdg", "ref_hdg"]);   // plotted unwrapped, read as a compass
 const value = c => (u, v) => v == null ? "" : CATS[c] ? CATS[c][v - 1]
+                             : WRAPPED.has(c) ? (((v % 360) + 360) % 360).toFixed(0) + "\u00b0"
                              : Number.isInteger(v) ? v : v.toFixed(2);
 const charts = [];
 

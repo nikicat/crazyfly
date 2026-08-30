@@ -306,11 +306,13 @@ values under it, drag to zoom them all together, double-click to zoom back
 out, click a legend entry to hide a series. Open it in any browser;
 `uv run cf.py plot [file]` renders one again, the newest by default.
 
-The panels are mode (hold, height mode, flip phase), height (`estimatedZ`
+The panels are mode (hold, height mode, flip phase, and the charge estimate
+derived from the log, so old recordings get it too), height (`estimatedZ`
 against the reference, vertical speed against the climb rate asked for),
 thrust (the word sent, what the firmware drove, the four motors, battery),
 roll, pitch (command against attitude, with the gyro rate) and yaw (rate
-against gyro, heading against the reference). What a firmware or a flight did
+against gyro, heading against the reference -- drawn continuous across the
+0/360 seam, the legend still reading as a compass). What a firmware or a flight did
 not record is left out rather than drawn empty.
 
 The CSV holds three streams told apart by `src`, each row with its own `t`
