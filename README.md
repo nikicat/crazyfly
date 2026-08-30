@@ -109,6 +109,7 @@ identical either way and `uv run hoptest.py --thrust 42000` still works.
 | `hop` | `hoptest.py` | Bounded indoor hops that converge on a trim setting |
 | `orient` | `orient.py` | Work out which arm of the drone is the front, by tilting it |
 | `motors` | `motorcheck.py` | Find an axis's sign on the ground, by which motor stops |
+| `spin` | `spincheck.py` | Drive one motor by hand and note where it starts and stops turning |
 | `airborne` | `flightcheck.py` | Confirm the drone is airborne before trusting a trim result |
 
 ### Firmware

@@ -25,6 +25,7 @@ import maglog
 import motorcheck
 import orient
 import scan
+import spincheck
 import teleop
 import trimcheck
 from hoptest import run as hop_run
@@ -55,6 +56,7 @@ app.command("trim", help=trimcheck.run.__doc__)(trimcheck.run)
 app.command("hop", help=hop_run.__doc__)(hop_run)
 app.command("orient", help=orient.run.__doc__)(orient.run)
 app.command("motors", help=motorcheck.run.__doc__)(motorcheck.run)
+app.command("spin", help=spincheck.run.__doc__)(spincheck.run)
 app.command("airborne", help=flightcheck.run.__doc__)(flightcheck.run)
 
 
