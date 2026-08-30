@@ -306,9 +306,20 @@ class Session:
 
         The reference is wherever the heading was when the stick came back to
         centre. Touching the stick releases it; it is taken afresh on release.
+        On the ground the stick turns the reference instead, so the drone can
+        be aimed before takeoff and swings round to it, at HDG_MAX_RATE, once
+        it is flying. Landing keeps it.
         """
         hdg = self.hdg
-        if hdg is None or not self.thrust or self.flip is not None or self.yaw_rate:
+        if hdg is None or self.flip is not None:
+            self.ref_hdg = None
+            return
+        if not self.thrust:
+            if self.yaw_rate:
+                aim = hdg if self.ref_hdg is None else self.ref_hdg
+                self.ref_hdg = (aim + HDG_SIGN * self.yaw_rate * DT) % 360
+            return
+        if self.yaw_rate:
             self.ref_hdg = None
             return
         if self.ref_hdg is None:

@@ -103,7 +103,8 @@ def test_keyboard_yaw_releases_to_zero():
 def test_heading_hold_trims_yaw_toward_the_release_heading():
     """Stick centred and airborne: the heading where it was released is held,
     the correction takes the short way round the circle and is capped, and
-    touching the stick or cutting thrust lets go of it."""
+    touching the stick lets go of it. On the ground the stick aims the
+    reference instead, and the next takeoff swings round to it."""
     session = teleop.Session(fake_scf(FakeCrazyflie()), flight.Trim(),
                              mag_offset=(0.0, 0.0, 0.0), gamepad=False)
     session.has_mag = True
@@ -131,9 +132,18 @@ def test_heading_hold_trims_yaw_toward_the_release_heading():
     tick(300)                                      # taken afresh on release
     assert session.ref_hdg == pytest.approx(300) and session.yaw_rate == 0
 
-    session.thrust = 0.0                           # on the ground: nothing to hold
+    session.thrust = 0.0                           # landed: kept, but no correction
     tick(300)
-    assert session.ref_hdg is None and session.yaw_rate == 0
+    assert session.ref_hdg == pytest.approx(300) and session.yaw_rate == 0
+
+    turned = teleop.HDG_SIGN * flight.MAX_YAW_RATE * flight.DT
+    tick(300, "d")                                 # aim it from the ground
+    tick(300)
+    assert session.ref_hdg == pytest.approx(300 + turned) and session.yaw_rate == 0
+
+    session.thrust = 30000                         # airborne: swings round to the aim
+    tick(300)
+    assert session.yaw_rate == pytest.approx(teleop.HDG_SIGN * teleop.HDG_KP * turned)
 
 
 def test_trim_keys_step_and_reset():
