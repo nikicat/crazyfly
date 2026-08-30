@@ -170,13 +170,22 @@ def save_hover(thrust: float) -> None:
 BATTERY_SAG = setting("battery.sag", 0.55)   # volts the pack drops under flying load
 
 
-def charge(vbat: float, airborne: bool) -> float:
-    """Percent charge from the battery voltage, sag-corrected while flying.
+def rest_voltage(vbat: float, airborne: bool) -> float:
+    """What the pack would read unloaded: the flying sag added back.
+
+    Correct each sample by its own state and smooth the corrected values --
+    correcting an average that straddles a takeoff or landing applies the
+    wrong offset to half the window and spikes the estimate.
+    """
+    return vbat + (BATTERY_SAG if airborne else 0.0)
+
+
+def charge(rest: float) -> float:
+    """Percent charge from a resting-equivalent voltage (see rest_voltage).
 
     Feed it a voltage smoothed over a second or two; the raw samples jitter
     by a few hundredths.
     """
-    rest = vbat + (BATTERY_SAG if airborne else 0.0)
     for (v0, p0), (v1, p1) in zip(LIPO_CURVE, LIPO_CURVE[1:], strict=False):
         if rest <= v1:
             return clamp(p0 + (p1 - p0) * (rest - v0) / (v1 - v0), 0.0, 100.0)

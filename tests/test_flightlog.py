@@ -49,9 +49,9 @@ def test_render_derives_charge_and_unwraps_headings(tmp_path):
     html = flightlog.render(path).read_text()
     data = json.loads(re.search(r"const DATA = (.*?);\n", html).group(1))
 
-    assert data["columns"]["charge"][0] == pytest.approx(flight.charge(3.75, False), abs=0.1)
-    # smoothing mixes both samples; the sag is added back while airborne
-    smoothed = (3.75 + 3.75 - flight.BATTERY_SAG) / 2
-    assert data["columns"]["charge"][1] == pytest.approx(flight.charge(smoothed, True), abs=0.1)
+    assert data["columns"]["charge"][0] == pytest.approx(flight.charge(3.75), abs=0.1)
+    # the sagged flying sample reads the same charge as the resting one:
+    # each is corrected by its own state, so a takeoff cannot spike the mean
+    assert data["columns"]["charge"][1] == data["columns"]["charge"][0]
     assert data["columns"]["hdg"][2:] == [350.0, 358.0, 362.0, 370.0, 350.0]
     assert data["columns"]["ref_hdg"][2:] == [365.0] * 5      # one revolution up, with hdg

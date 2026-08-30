@@ -30,7 +30,7 @@ from pathlib import Path
 
 import typer
 
-from flight import DATA, charge
+from flight import DATA, charge, rest_voltage
 
 FLIGHTS = DATA / "flights"
 HERE = Path(__file__).parent
@@ -125,8 +125,8 @@ def load(path: Path) -> tuple[dict[str, list], dict[str, list[str]]]:
 def add_charge(columns: dict[str, list]) -> None:
     """A percent-charge column derived from the log, so old recordings get it too.
 
-    The same estimate as teleop's status line: vbat smoothed over the last 20
-    log samples, sag-corrected while the firmware is driving the motors.
+    The same estimate as teleop's status line: each sample sag-corrected by
+    its own thrust state, then smoothed over the last 20 log samples.
     """
     vbats = columns.get("pm.vbat")
     if not vbats or not any(v is not None for v in vbats):
@@ -138,8 +138,8 @@ def add_charge(columns: dict[str, list]) -> None:
         if vbat is None:
             series.append(None)
             continue
-        recent.append(vbat)
-        series.append(round(charge(sum(recent) / len(recent), bool(thrust)), 1))
+        recent.append(rest_voltage(vbat, bool(thrust)))
+        series.append(round(charge(sum(recent) / len(recent)), 1))
     columns["charge"] = series
 
 

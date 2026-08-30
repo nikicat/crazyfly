@@ -139,10 +139,10 @@ def test_heading_is_level_corrected_and_offset_free():
 def test_charge_maps_voltage_to_percent_with_flying_sag():
     """The generic curve interpolates and clamps; flying reads the same charge
     BATTERY_SAG lower, and the correction never depends on the thrust value."""
-    assert flight.charge(4.20, airborne=False) == 100
-    assert flight.charge(4.35, airborne=False) == 100
-    assert flight.charge(3.30, airborne=False) == 0
-    assert flight.charge(2.95, airborne=False) == 0
-    assert flight.charge(3.70, airborne=False) == pytest.approx(32.5)
-    assert (flight.charge(3.70 - flight.BATTERY_SAG, airborne=True)
-            == pytest.approx(flight.charge(3.70, airborne=False)))
+    assert flight.charge(4.20) == 100
+    assert flight.charge(4.35) == 100
+    assert flight.charge(3.30) == 0
+    assert flight.charge(2.95) == 0
+    assert flight.charge(3.70) == pytest.approx(32.5)
+    assert (flight.charge(flight.rest_voltage(3.70 - flight.BATTERY_SAG, airborne=True))
+            == pytest.approx(flight.charge(3.70)))

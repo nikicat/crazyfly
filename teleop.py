@@ -52,6 +52,7 @@ from flight import (
     load_hover,
     load_mag_offset,
     load_trim,
+    rest_voltage,
     save_hover,
     save_trim,
     stop_motors,
@@ -508,8 +509,10 @@ class Session:
         if vbat is None:
             bat = "?"
         else:
-            recent = [s["pm.vbat"] for s in self.battery[-20:]]    # ~2 s of the 10 Hz log
-            pct = charge(sum(recent) / len(recent), self.airborne)
+            recent = [rest_voltage(s["pm.vbat"],                   # ~2 s of the 10 Hz log,
+                                   bool(s.get(FW_THRUST_LOG, self.airborne)))
+                      for s in self.battery[-20:]]                   # each sample by its own state
+            pct = charge(sum(recent) / len(recent))
             bat = f"{vbat:.2f}V {pct:3.0f}%{' LOW' if vbat < VBAT_CRITICAL else ''}"
         z = hdg = ""
         if self.z is not None:
