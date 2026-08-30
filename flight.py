@@ -42,6 +42,7 @@ VBAT_CRITICAL = 3.4      # volts; land now. Full is ~4.2, sags a few tenths unde
 DATA = Path(__file__).with_name("data")     # state that belongs to this drone, not the code
 TRIM_FILE = DATA / "trim.json"
 MAG_FILE = DATA / "mag.json"                # hard-iron offset from `cf.py mag --save`
+HOVER_FILE = DATA / "hover.json"            # thrust the drone last hovered at, learnt by teleop
 FRAME_FILE = DATA / "frame.json"            # which arm each motor is on
 CONFIG_FILE = DATA / "config.json"          # knobs: {"flip": {"min_vbat": 3.7}}
 ARMS = ("front", "right", "back", "left")
@@ -138,6 +139,18 @@ def load_frame() -> dict[str, str] | None:
 
 def save_mag_offset(x: float, y: float, z: float) -> None:
     write_json(MAG_FILE, {"x": round(x, 4), "y": round(y, 4), "z": round(z, 4)})
+
+
+def load_hover() -> float | None:
+    saved = read_json(HOVER_FILE)
+    try:
+        return float(saved["thrust"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def save_hover(thrust: float) -> None:
+    write_json(HOVER_FILE, {"thrust": int(thrust)})
 
 
 def heading(mx: float, my: float, mz: float, roll: float, pitch: float,

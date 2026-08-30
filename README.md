@@ -145,11 +145,13 @@ uv run teleop.py
 ```
 
 ```
-w / s     thrust up / down          arrows    roll and pitch
+w / s     height up / down          arrows    roll and pitch
 a / d     yaw left / right          space     cut thrust to zero
-h         height hold on / off      ESC / q   land and quit
+h         height mode off / on      ESC / q   land and quit
 f         roll flip (battery above flip.min_vbat, two metres of air)
 ```
+
+Raise the height to take off; lower it onto the ground to land.
 
 Or with an Xbox controller paired over Bluetooth (`/dev/input/js0`):
 
@@ -158,42 +160,59 @@ uv run teleop.py --gamepad
 ```
 
 ```
-left stick    up = thrust, centre = motors off
+left stick    height up / down, centre holds
 right stick   roll and pitch, proportional     B        cut thrust to zero
 LT / RT       yaw left / right, proportional
 D-pad         trim roll / pitch                View     reset trim
-A             height hold on / off             Menu     land and quit
+A             height mode off / on             Menu     land and quit
 Y             roll flip (battery above flip.min_vbat, two metres of air)
 keyboard      q / ESC / space still work
 ```
 
 The sticks are proportional, so a small nudge is a small lean, and the spring
-returns each axis to neutral -- no decay needed. The left stick is a throttle:
-centre is motors off and thrust grows linearly with how far up it is pushed, so
-hover sits around four fifths of the travel. It follows the stick up at once
-but comes down at the landing ramp's rate, so letting go is a descent, not a
-drop. Losing the controller
+returns each axis to neutral -- no decay needed. In height mode the left stick
+moves the target height, centre holds it. With height mode off it is a
+throttle: centre is motors off and thrust grows linearly with how far up it is
+pushed, so hover sits around four fifths of the travel; it follows the stick
+up at once but comes down at the landing ramp's rate, so letting go is a
+descent, not a drop. Losing the controller
 mid-flight (Bluetooth drop, flat battery) lands the drone through the normal
 ramp. `flight.py` reads the joystick with the stdlib, no evdev or pygame; the
 axis and button numbers there were measured on an Xbox Series controller over
 Bluetooth and differ from USB `xpad`, so remeasure before flying a different pad.
 
-### Height hold
+### Height
 
-Once airborne, `h` (or A on the pad) hands height to the barometer: teleop
-sets `flightmode.althold`, and from then on the thrust stick is a climb rate
--- centre holds, up climbs, down sinks, full scale 1 m/s -- while the firmware
-makes thrust itself from a vertical-speed PID around `posCtlPid.thrustBase`.
-Teleop sets that base to the thrust you were hovering at when you engaged,
-the best hover estimate there is, battery sag included. Toggling again,
-`space`, or landing hands thrust back at that same value. The status line
-shows `HOLD` and the height since connecting, from `posEstimatorAlt.estimatedZ`.
+By default teleop flies height by reference, the way it flies heading: the
+thrust stick moves a target height -- `w`/`s` at 0.5 m/s, the left stick at
+up to 1 m/s -- and a loop steers the firmware's barometric hold at it. The
+firmware side is `flightmode.althold`: with it set the thrust word is a climb
+rate, centre holds and full scale is 1 m/s, and thrust is made on board by a
+vertical-speed PID around `posCtlPid.thrustBase`, never below its `thrustMin`.
+Teleop asks for `Z_KP` (1/s) times the height error, capped at 0.5 m/s, from
+`posEstimatorAlt.estimatedZ` in the 10 Hz log.
 
-Hold is refused on the ground on purpose: with the flag set, even a zero
-setpoint spins the motors at the firmware's `thrustMin`. For the same reason
-teleop clears it right after every connect -- it survives a link loss.
-Barometric hold wanders with pressure: doors, windows and heating move it by
-decimetres, so expect "drifts slowly" rather than "pinned".
+On the ground the motors are off and the target rests wherever the barometer
+puts the ground, so pressure drift cannot lift it by itself. Push the stick up
+until the target is 10 cm above the drone and the hold engages around the
+hover thrust; keep pushing to climb. To land, lower the target: once it is
+15 cm below where the drone thinks it is and the firmware has sat at
+`thrustMin` for a second -- the floor is holding the drone up and the I term
+has wound thrust down -- the hold is released, the motors stop and the target
+is back on the ground. `space` still cuts at any time, and `q` lands through
+the ramp from the thrust the firmware was using.
+
+The hover thrust is `posCtlPid.thrustBase` for takeoff: 42000 until a flight
+has measured it. While the drone holds still on the target teleop averages
+the thrust the firmware is using, and saves it to `data/hover.json` on exit.
+The status line shows `z +0.52>+0.60m`, height since connecting and the
+target, and `HOLD` with the climb rate being asked for.
+
+`h` (or A) hands thrust back to the stick at whatever the firmware was using;
+pressing it again engages the hold at the thrust you are hovering at. The
+flag survives a link loss, so teleop clears it right after every connect.
+Barometric height wanders with pressure: doors, windows and heating move it
+by decimetres, so expect "drifts slowly" rather than "pinned".
 
 ### Flip
 

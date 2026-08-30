@@ -156,3 +156,57 @@ def test_trim_keys_step_and_reset():
     for _ in range(100):
         session.handle_keys(["["])
     assert session.trim.roll == -flight.TRIM_LIMIT
+
+
+def test_height_mode_takes_off_holds_and_lands_by_reference():
+    """Height mode: the stick moves the reference. Raising it off the ground
+    engages the firmware hold around the hover thrust, the loop steers the
+    climb rate at it and learns the hover thrust while still, and asking for
+    well below the drone while the firmware sits at thrustMin lands."""
+    drone = FakeCrazyflie()
+    session = teleop.Session(fake_scf(drone), flight.Trim(), mag_offset=None, gamepad=False)
+    session.has_hold = session.height_mode = True
+    params = {}
+    session.cf.param.set_value = lambda name, value: params.__setitem__(name, value)
+    step = teleop.KEY_CLIMB * teleop.Z_RATE * flight.DT     # metres per tick of w / s
+
+    def tick(z: float, thrust: float, *keys: str, now: float = 0.0) -> None:
+        """One loop tick: the log reads height z and firmware thrust, then sticks, then the loop."""
+        session.battery.append({"pm.vbat": 3.9, teleop.Z_LOG: z, teleop.FW_THRUST_LOG: thrust})
+        session.read_keyboard(Holding(*keys))
+        session.hold_height(now)
+
+    tick(5.0, 0)                                   # landed: the reference rests on the ground
+    assert session.ref_z == 5.0 and not session.hold and session.thrust == 0
+    tick(4.9, 0)                                   # ...and follows the barometer's drift
+    assert session.ref_z == 4.9
+    for _ in range(3):
+        tick(4.9, 0, "w")                          # a short push: not enough to lift off
+    assert session.ref_z == pytest.approx(4.9 + 3 * step) and not session.hold
+    tick(4.9, 0)                                   # released: back on the ground
+    assert session.ref_z == 4.9
+    while not session.hold:
+        tick(4.9, 0, "w")                          # held: takes off past TAKEOFF_ABOVE
+    assert session.ref_z > 4.9 + teleop.TAKEOFF_ABOVE
+    assert params[teleop.THRUST_BASE] == str(teleop.HOVER_DEFAULT) and params[teleop.ALTHOLD] == "1"
+
+    tick(4.9, 30000)                               # airborne, under the reference: climb
+    assert session.climb == pytest.approx(teleop.Z_KP * (session.ref_z - 4.9))
+    session.send()
+    assert drone.commander.thrusts[-1] == int(teleop.HOLD_CENTRE + teleop.HOLD_SPAN * session.climb)
+
+    ref = session.ref_z
+    for _ in range(teleop.HOVER_SAMPLES):
+        tick(ref, 41000)                           # holding still: that thrust is hover
+    assert session.learned_hover() == pytest.approx(41000)
+    tick(ref + 1.0, 41000)                         # a metre too high: sink, capped
+    assert session.climb == -teleop.Z_MAX_RATE
+
+    for _ in range(40):
+        tick(ref, 41000, "s")                      # stick down: the reference goes under the floor
+    assert session.ref_z == pytest.approx(ref - 40 * step) and session.hold
+    tick(ref, teleop.FW_THRUST_MIN, now=0.5)       # firmware bottomed out, not for long enough
+    assert session.hold
+    tick(ref, teleop.FW_THRUST_MIN, now=1.5)       # ...now it has: landed
+    assert not session.hold and session.thrust == 0 and session.ref_z == ref
+    assert params[teleop.ALTHOLD] == "0" and session.hover == pytest.approx(41000)

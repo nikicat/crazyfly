@@ -6,6 +6,7 @@ __pycache__/
 
 # Per-drone state that data/ keeps outside git: the live trim and cflib's TOC cache.
 data/trim.json
+data/hover.json
 data/cache/
 
 # Firmware images and recordings, apart from the one backup that documents the drone.

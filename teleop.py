@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Manual keyboard or gamepad flight.
 
-Sends raw roll/pitch/yaw/thrust setpoints, so it needs no positioning deck --
-but it also means nothing holds the drone up except you. Fly over a clear
-area, keep a hand near ESC, and start with small thrust. The controls are in
-KEYBOARD_HELP and GAMEPAD_HELP below; the one in use is printed at start.
+Sends roll/pitch/yaw setpoints and, by default, flies height by reference: the
+thrust stick moves a target height and the firmware's barometric hold is
+steered at it, so taking off is raising the target off the ground and landing
+is lowering it back. h / A switches to raw thrust on the stick, where nothing
+holds the drone up but you. Either way fly over a clear area and keep a hand
+near ESC. The controls are in KEYBOARD_HELP and GAMEPAD_HELP below; the one in
+use is printed at start.
 
 Trim is a constant offset added to every setpoint, to cancel a steady drift.
 Adjust it in the air a notch at a time; it is saved to trim.json on exit and
@@ -44,8 +47,10 @@ from flight import (
     Trim,
     clamp,
     heading,
+    load_hover,
     load_mag_offset,
     load_trim,
+    save_hover,
     save_trim,
     stop_motors,
 )
@@ -54,24 +59,41 @@ TRIM_STEP = 0.2          # degrees per keypress, live in the air
 TRIM_KEYS = {"[": ("roll", -1), "]": ("roll", +1), ";": ("pitch", -1), "'": ("pitch", +1)}
 
 KEYBOARD_HELP = """\
-  w / s     thrust up / down     arrows   roll and pitch     a / d   yaw
+  w / s     height up / down     arrows   roll and pitch     a / d   yaw
   space     cut thrust           [ ] ; '  trim roll / pitch  0       reset trim
-  h         height hold on/off (then w / s climb / sink)    ESC / q  land and quit
-  f         roll flip -- battery above flip.min_vbat (config.json), two metres of air"""
+  h         height mode off / on (off: w / s is raw thrust)  ESC / q  land and quit
+  f         roll flip -- battery above flip.min_vbat (config.json), two metres of air
+  Raise the height to take off; lower it onto the ground to land."""
 GAMEPAD_HELP = """\
-  left stick   thrust (centre = off)   right stick   roll and pitch    LT / RT  yaw
+  left stick   height up / down        right stick   roll and pitch    LT / RT  yaw
   B            cut thrust              D-pad         trim roll / pitch  View     reset trim
-  A            height hold on/off (then left stick climbs / sinks)   Menu / q  land and quit
-  Y            roll flip -- battery above flip.min_vbat (config.json), two metres of air"""
+  A            height mode off / on (off: left stick is a throttle)   Menu / q  land and quit
+  Y            roll flip -- battery above flip.min_vbat (config.json), two metres of air
+  Raise the height to take off; lower it onto the ground to land."""
 
-# Height hold, firmware 2017.06: with flightmode.althold set the thrust word is
-# a climb rate instead -- HOLD_CENTRE holds, full scale is 1 m/s either way --
-# and the firmware makes thrust itself as vzPID * 1000 + posCtlPid.thrustBase.
+# Height, firmware 2017.06: with flightmode.althold set the thrust word is a
+# climb rate -- HOLD_CENTRE holds, full scale 1 m/s -- and the firmware makes
+# thrust itself as vzPID * 1000 + posCtlPid.thrustBase, never below its
+# thrustMin. Teleop keeps a height reference the stick moves, as it does for
+# heading, and steers the climb rate at it. Raising it off the ground takes
+# off. It has landed once it is asked to sink well below where it is while
+# the firmware has sat at thrustMin for a while: the floor is holding the
+# drone up and the vertical-speed loop's I term has wound thrust down.
 ALTHOLD = "flightmode.althold"
 THRUST_BASE = "posCtlPid.thrustBase"
 HOLD_CENTRE = 32767
 HOLD_SPAN = 32767
 Z_LOG = "posEstimatorAlt.estimatedZ"
+FW_THRUST_LOG = "stabilizer.thrust"
+FW_THRUST_MIN = 20000    # posCtlPid.thrustMin, the firmware default
+HOVER_DEFAULT = 42000    # thrustBase until a flight has taught hover.json better
+Z_RATE = 1.0             # m/s the reference moves at, full stick
+Z_KP = 1.0               # climb rate per metre of height error
+Z_MAX_RATE = 0.5         # m/s, the most the loop asks for
+TAKEOFF_ABOVE = 0.10     # reference this far above the ground lifts off
+LAND_BELOW = 0.15        # reference this far below the drone, with the
+TOUCHDOWN_S = 1.0        # firmware at thrustMin for this long: on the ground
+HOVER_SAMPLES = 20       # of the firmware's thrust while still, to trust a mean
 MAG_LOGS = {"mag.x": "float", "mag.y": "float", "mag.z": "float",
             "stabilizer.roll": "FP16", "stabilizer.pitch": "FP16"}
 KEY_CLIMB = 0.5          # fraction of the full climb rate while w / s is held
@@ -132,7 +154,8 @@ class Session:
     from the previous one. fly() runs the loop and always lands on the way out.
     """
 
-    def __init__(self, scf, trim: Trim, mag_offset, gamepad: bool) -> None:
+    def __init__(self, scf, trim: Trim, mag_offset, gamepad: bool,
+                 hover: float | None = None) -> None:
         self.scf = scf
         self.cf = scf.cf
         self.trim = trim
@@ -143,10 +166,15 @@ class Session:
 
         self.thrust = 0.0
         self.roll = self.pitch = self.yaw_rate = self.climb = 0.0
-        self.hold = False
+        self.hold = False                      # flightmode.althold is set
+        self.height_mode = self.has_hold       # the stick moves a height reference
+        self.ref_z: float | None = None        # that reference, in the estimator's frame
+        self.hover = HOVER_DEFAULT if hover is None else hover   # thrustBase at takeoff
+        self.hover_samples: list[float] = []   # the firmware's thrust while holding still
+        self.lifting_at = 0.0                  # when the firmware last pushed above thrustMin
         self.ref_hdg: float | None = None      # compass heading being held, if any
         self.link_lost = False
-        self.battery: list[dict] = []          # the 2 Hz log, newest last
+        self.battery: list[dict] = []          # the 10 Hz log, newest last
 
         self.flip: flipping.Flip | None = None
         self._flip_log = None                  # the gyro recorder, open during a flip
@@ -163,6 +191,21 @@ class Session:
         for axis in ("stabModeRoll", "stabModePitch"):
             self.cf.param.set_value(f"flightmode.{axis}", "0" if on else "1")
 
+    def engage_hold(self, base: float, now: float | None = None) -> None:
+        """Hand thrust to the firmware's vertical-speed loop, around `base`."""
+        self.cf.param.set_value(THRUST_BASE, str(int(base)))
+        self.set_hold(True)
+        # Parameter writes are fire-and-forget; give them the air before the
+        # next setpoint, or a climb-rate word lands as raw thrust for a tick.
+        time.sleep(0.1)
+        self.lifting_at = time.time() if now is None else now
+
+    def release_hold(self) -> None:
+        """Take thrust back at whatever the firmware was flying with, so nothing drops."""
+        if self.hold:
+            self.thrust = self.fw_thrust or self.thrust
+            self.set_hold(False)
+
     def prepare(self) -> None:
         """Clear modes left over from a previous session and unlock the commander."""
         # Height hold survives a link loss but not a reboot, and with it on
@@ -177,17 +220,38 @@ class Session:
         self.cf.commander.send_setpoint(0, 0, 0, 0)
 
     def log_variables(self) -> dict[str, str]:
-        """Battery at 2 Hz, plus height and the compass where the firmware has them."""
+        """Battery at 10 Hz, plus height, thrust and the compass where the firmware has them."""
         variables = {"pm.vbat": "float"}
         if self.has_hold:
             variables[Z_LOG] = "float"
+            variables[FW_THRUST_LOG] = "uint16_t"
         if self.has_mag:
-            variables.update(MAG_LOGS)      # 24 of the packet's 26 bytes, all in
+            variables.update(MAG_LOGS)      # fills the packet's 26 bytes exactly
         return variables
 
     @property
     def vbat(self) -> float | None:
         return self.battery[-1]["pm.vbat"] if self.battery else None
+
+    @property
+    def z(self) -> float | None:
+        """Height from the latest sample, in the estimator's frame; None without a barometer."""
+        return self.battery[-1][Z_LOG] if self.has_hold and self.battery else None
+
+    @property
+    def fw_thrust(self) -> float | None:
+        """What the firmware is actually driving the motors with, from the latest sample."""
+        return self.battery[-1][FW_THRUST_LOG] if self.has_hold and self.battery else None
+
+    @property
+    def airborne(self) -> bool:
+        return self.hold or self.thrust > 0
+
+    def learned_hover(self) -> float | None:
+        """Mean firmware thrust while holding still this flight, given enough of it."""
+        if len(self.hover_samples) < HOVER_SAMPLES:
+            return None
+        return sum(self.hover_samples) / len(self.hover_samples)
 
     @property
     def hdg(self) -> float | None:
@@ -200,24 +264,26 @@ class Session:
 
     # --- one-shot keys --------------------------------------------------------
 
-    def toggle_hold(self) -> None:
-        if self.hold:
-            self.set_hold(False)
-        elif not self.has_hold:
+    def toggle_height_mode(self) -> None:
+        """h / A: height by reference (the default), or raw thrust on the stick."""
+        if not self.has_hold:
             print("\nThis firmware has no height hold.", flush=True)
-        elif self.thrust > MIN_THRUST:
-            # The thrust you hover at is the best hover estimate there is,
-            # battery sag included; the firmware's I term trims the rest.
-            self.cf.param.set_value(THRUST_BASE, str(int(self.thrust)))
-            self.set_hold(True)
+        elif self.height_mode:
+            self.release_hold()
+            self.height_mode = False
+            self.ref_z = None
         else:
-            print("\nTake off first, then hold.", flush=True)
+            self.height_mode = True
+            if self.thrust > MIN_THRUST:
+                # The thrust you hover at is the best hover estimate there is,
+                # battery sag included; the firmware's I term trims the rest.
+                self.engage_hold(self.thrust)
 
     def start_flip(self) -> None:
         vbat = self.vbat or 0.0
         if not self.has_hold:
             print("\nThis firmware has no rate mode; no flip.", flush=True)
-        elif self.thrust <= MIN_THRUST:
+        elif not self.airborne:
             print("\nTake off first, then flip.", flush=True)
         elif vbat < flipping.MIN_VBAT:
             print(f"\nBattery {vbat:.2f} V is under {flipping.MIN_VBAT} V; "
@@ -235,17 +301,19 @@ class Session:
             self._flip_log.__exit__(None, None, None)
         self.set_rate_mode(False)
         self.flip = self._flip_log = None
+        if self.height_mode and self.ref_z is not None:
+            self.engage_hold(self.hover)    # the height loop climbs back to the reference
 
     def cut(self) -> None:
-        if self.hold:
-            self.set_hold(False)
         if self.flip is not None:
             self.end_flip()
+        if self.hold:
+            self.set_hold(False)
         self.thrust = 0.0
 
     def handle_keys(self, events: list[str]) -> None:
         if "h" in events:
-            self.toggle_hold()
+            self.toggle_height_mode()
         if "f" in events and self.flip is None:
             self.start_flip()
         if " " in events:
@@ -271,12 +339,13 @@ class Session:
         self.thrust = 0.0 if self.thrust < MIN_THRUST else self.thrust
 
     def read_gamepad(self, inp: Gamepad) -> None:
-        # Sticks spring back on their own, so no decay. The left stick is a
-        # throttle: centre is motors off, thrust grows with how far up it is
-        # pushed. It follows the stick up at once but comes down no faster
-        # than the landing ramp, so letting go is a descent rather than a drop.
+        # Sticks spring back on their own, so no decay. In height mode the
+        # left stick moves the reference; otherwise it is a throttle: centre
+        # is motors off, thrust grows with how far up it is pushed. It follows
+        # the stick up at once but comes down no faster than the landing ramp,
+        # so letting go is a descent rather than a drop.
         self.climb = inp.axis("thrust")
-        if not self.hold:               # holding: manual thrust waits for release
+        if not (self.hold or self.height_mode):    # else the stick moves the height
             target = MAX_THRUST * max(0.0, self.climb)
             self.thrust = max(target, self.thrust - THRUST_STEP)
         self.roll = MAX_ANGLE * inp.axis("roll")
@@ -285,8 +354,8 @@ class Session:
 
     def read_keyboard(self, inp: Keyboard) -> None:
         self.climb = KEY_CLIMB if inp.down("w") else -KEY_CLIMB if inp.down("s") else 0.0
-        if self.hold:
-            pass                        # manual thrust waits for release
+        if self.hold or self.height_mode:
+            pass                        # the keys move the height instead
         elif inp.down("w"):
             self.thrust = clamp(self.thrust + THRUST_STEP, MIN_THRUST, MAX_THRUST)
         elif inp.down("s"):
@@ -314,7 +383,7 @@ class Session:
         if hdg is None or self.flip is not None:
             self.ref_hdg = None
             return
-        if not self.thrust:
+        if not self.airborne:
             if self.yaw_rate:
                 aim = hdg if self.ref_hdg is None else self.ref_hdg
                 self.ref_hdg = (aim + HDG_SIGN * self.yaw_rate * DT) % 360
@@ -327,6 +396,44 @@ class Session:
         error = (self.ref_hdg - hdg + 180) % 360 - 180
         self.yaw_rate = HDG_SIGN * clamp(HDG_KP * error, -HDG_MAX_RATE, HDG_MAX_RATE)
 
+    def hold_height(self, now: float | None = None) -> None:
+        """Height mode: the stick moves ref_z, and the climb rate steers z to it.
+
+        On the ground the motors are off and the reference rests wherever the
+        barometer says the ground is, so pressure drift cannot lift it; push
+        it TAKEOFF_ABOVE up and the hold engages around the hover thrust.
+        Flying, the loop asks for a climb rate towards it, and samples the
+        firmware's thrust while still for the next takeoff. Asking for well
+        below the drone while the firmware sits at thrustMin means the floor is
+        holding it up: hold off, motors off, reference back on the ground.
+        """
+        z = self.z
+        if not self.height_mode or z is None or self.flip is not None:
+            return
+        now = time.time() if now is None else now
+        if self.ref_z is None:
+            self.ref_z = z
+        self.ref_z += self.climb * Z_RATE * DT
+        if not self.hold:
+            self.thrust = 0.0
+            if self.climb <= 0:
+                self.ref_z = z          # resting on the ground, wherever the barometer puts it
+            elif self.ref_z > z + TAKEOFF_ABOVE:
+                self.engage_hold(self.hover, now)
+            return
+        error = self.ref_z - z
+        self.climb = clamp(Z_KP * error, -Z_MAX_RATE, Z_MAX_RATE)
+        thrust = self.fw_thrust or 0.0
+        if thrust > FW_THRUST_MIN * 1.1:
+            self.lifting_at = now
+            if abs(error) < 0.1:
+                self.hover_samples.append(thrust)
+        if error < -LAND_BELOW and now - self.lifting_at > TOUCHDOWN_S:
+            self.set_hold(False)
+            self.thrust = 0.0
+            self.ref_z = z
+            self.hover = self.learned_hover() or self.hover
+
     # --- output ---------------------------------------------------------------
 
     def send(self) -> None:
@@ -338,7 +445,8 @@ class Session:
             self._fed = len(self._gyro)
             command = self.flip.tick(time.time())
             if command is None:
-                self.end_flip()         # the stick has thrust again next tick
+                self.end_flip()         # the height loop, or the stick, has thrust again
+                word = HOLD_CENTRE if self.hold else self.thrust
             else:
                 self.roll, self.pitch, self.yaw_rate, word = command
                 trim = Trim()
@@ -346,21 +454,25 @@ class Session:
                                         self.yaw_rate, int(word))
 
     def status(self) -> str:
-        bar = "#" * int(20 * self.thrust / MAX_THRUST)
+        thrust = (self.fw_thrust or 0.0) if self.hold else self.thrust
+        bar = "#" * int(20 * thrust / MAX_THRUST)
         vbat = self.vbat
         bat = "?" if vbat is None else f"{vbat:.2f}V{' LOW' if vbat < VBAT_CRITICAL else ''}"
         z = hdg = ""
-        if self.has_hold and self.battery:
-            z = f"z {self.battery[-1][Z_LOG] - self.battery[0][Z_LOG]:+.2f}m"
+        if self.z is not None:
+            ground = self.battery[0][Z_LOG]
+            aim = "" if self.ref_z is None else f">{self.ref_z - ground:+.2f}"
+            z = f"z {self.z - ground:+.2f}{aim}m"
         if self.hdg is not None:
             held = "" if self.ref_hdg is None else f">{self.ref_hdg:3.0f}"
             hdg = f"hdg {self.hdg:3.0f}{held}"
         mode = (f"FLIP {self.flip.phase} {self.flip.turned:4.0f}" if self.flip is not None
-                else f"HOLD {self.climb:+.1f}" if self.hold else "")
-        return (f"\r{int(self.thrust):>6} {bar:<20} "
+                else f"HOLD {self.climb:+.1f}" if self.hold
+                else "HEIGHT" if self.height_mode else "")
+        return (f"\r{int(thrust):>6} {bar:<20} "
                 f"roll {self.roll:+5.1f} pitch {self.pitch:+5.1f} yaw {self.yaw_rate:+6.1f}  "
                 f"trim {self.trim.roll:+.1f}/{self.trim.pitch:+.1f}  bat {bat:<9} "
-                f"{z:<9} {hdg:<12} {mode:<9}")
+                f"{z:<15} {hdg:<12} {mode:<9}")
 
     # --- the loop -------------------------------------------------------------
 
@@ -384,6 +496,7 @@ class Session:
         self.handle_keys(events)
         self.read_sticks(inp)
         self.hold_heading()
+        self.hold_height()
         self.send()
         print(self.status(), end="", flush=True)
         return True
@@ -398,7 +511,7 @@ class Session:
         if self.flip is not None and not self.link_lost:
             self.end_flip()             # back to angle mode before the ramp
         if self.hold and not self.link_lost:
-            self.set_hold(False)        # the ramp below sends thrust, not climb rate
+            self.release_hold()         # the ramp below sends thrust, not a climb rate
             time.sleep(0.2)
         try:
             while self.thrust > MIN_THRUST:
@@ -414,9 +527,9 @@ class Session:
     def fly(self, inp, interrupt: Interruptible) -> None:
         """Run the loop until quit, Ctrl-C or a lost link; always lands on the way out."""
         self.prepare()
-        # One small log packet every half second costs the 250K link nothing
-        # next to 33 setpoints/s.
-        with cfenv.record_log(self.scf, self.log_variables(), period_ms=500) as battery:
+        # Ten small log packets a second ride down in the setpoint acks and
+        # cost the 250K link nothing; the height loop wants the fresh sample.
+        with cfenv.record_log(self.scf, self.log_variables(), period_ms=100) as battery:
             self.battery = battery
             try:
                 while True:
@@ -439,6 +552,7 @@ def run(
     saved = load_trim()
     trim = saved.override(roll_trim, pitch_trim)
     mag_offset = load_mag_offset()
+    saved_hover = hover = load_hover()
 
     if gamepad and not Path(JS_DEVICE).exists():
         sys.exit(f"No gamepad at {JS_DEVICE}. Press the Xbox button to wake it, then retry.")
@@ -460,9 +574,10 @@ def run(
         scf = wait_for_link(uri, inp, interrupt)
         while scf is not None:
             scf.wait_for_params()
-            session = Session(scf, trim, mag_offset, gamepad)
+            session = Session(scf, trim, mag_offset, gamepad, hover)
             session.fly(inp, interrupt)
             trim = session.trim
+            hover = session.learned_hover() or hover
             if not session.link_lost:
                 print("\nLanded, motors stopped.")
                 break
@@ -471,6 +586,9 @@ def run(
     if trim != saved:
         save_trim(*trim)
         print(f"Trim saved: roll {trim.roll:+.1f}, pitch {trim.pitch:+.1f}")
+    if hover is not None and hover != saved_hover:
+        save_hover(hover)
+        print(f"Hover thrust saved: {hover:.0f}")
 
 
 if __name__ == "__main__":
