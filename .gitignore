@@ -1,7 +1,14 @@
 .venv/
-cache/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
-trim.json
+
+# Per-drone state that data/ keeps outside git: the live trim and cflib's TOC cache.
+data/trim.json
+data/cache/
+
+# Firmware images and recordings, apart from the one backup that documents the drone.
+*.bin
+!data/firmware-backup.bin
+*.csv

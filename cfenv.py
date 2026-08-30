@@ -19,6 +19,7 @@ from cflib.drivers.crazyradio import Crazyradio
 from usb.core import USBError
 
 import cf1compat
+from flight import DATA
 
 DEFAULT_URI = "radio://0/40/250K"
 
@@ -126,7 +127,7 @@ def connect(uri: str, timeout: float = CONNECT_TIMEOUT,
     """
     if check_radio:
         _check_radio_free(uri)
-    return TimedSyncCrazyflie(uri, cf=Crazyflie(rw_cache="./cache"), timeout=timeout)
+    return TimedSyncCrazyflie(uri, cf=Crazyflie(rw_cache=str(DATA / "cache")), timeout=timeout)
 
 
 @contextmanager

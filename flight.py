@@ -39,10 +39,11 @@ HOLD = 0.12
 
 TRIM_LIMIT = 10.0        # refuse to trim past this; beyond it something is bent
 VBAT_CRITICAL = 3.4      # volts; land now. Full is ~4.2, sags a few tenths under load
-TRIM_FILE = Path(__file__).with_name("trim.json")
-MAG_FILE = Path(__file__).with_name("mag.json")    # hard-iron offset from `cf.py mag --save`
-FRAME_FILE = Path(__file__).with_name("frame.json")  # which arm each motor is on
-CONFIG_FILE = Path(__file__).with_name("config.json")  # knobs: {"flip": {"min_vbat": 3.7}}
+DATA = Path(__file__).with_name("data")     # state that belongs to this drone, not the code
+TRIM_FILE = DATA / "trim.json"
+MAG_FILE = DATA / "mag.json"                # hard-iron offset from `cf.py mag --save`
+FRAME_FILE = DATA / "frame.json"            # which arm each motor is on
+CONFIG_FILE = DATA / "config.json"          # knobs: {"flip": {"min_vbat": 3.7}}
 ARMS = ("front", "right", "back", "left")
 
 JS_DEVICE = "/dev/input/js0"
@@ -83,47 +84,60 @@ class Trim(NamedTuple):
                     self.pitch if pitch is None else pitch)
 
 
-def load_trim() -> Trim:
+def read_json(path: Path) -> dict:
+    """The JSON object in `path`, or {} when the file is missing or not an object.
+
+    Every state file is optional -- a fresh checkout has no trim, no compass
+    offset -- so a missing or broken one reads as "nothing saved", not an error.
+    """
     try:
-        saved = json.loads(TRIM_FILE.read_text())
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def write_json(path: Path, value: dict) -> None:
+    path.write_text(json.dumps(value, indent=2) + "\n")
+
+
+def load_trim() -> Trim:
+    saved = read_json(TRIM_FILE)
+    try:
         return Trim(float(saved["roll"]), float(saved["pitch"]))
-    except (OSError, ValueError, KeyError):
+    except (KeyError, TypeError, ValueError):
         return Trim()
 
 
 def load_mag_offset() -> tuple[float, float, float] | None:
+    saved = read_json(MAG_FILE)
     try:
-        saved = json.loads(MAG_FILE.read_text())
         return float(saved["x"]), float(saved["y"]), float(saved["z"])
-    except (OSError, ValueError, KeyError):
+    except (KeyError, TypeError, ValueError):
         return None
 
 
 def setting(name: str, default):
     """A knob from config.json by dotted name, e.g. setting("flip.min_vbat", 3.7)."""
+    value = read_json(CONFIG_FILE)
     try:
-        value = json.loads(CONFIG_FILE.read_text())
         for key in name.split("."):
             value = value[key]
         return type(default)(value)
-    except (OSError, ValueError, KeyError, TypeError):
+    except (KeyError, TypeError, ValueError):
         return default
 
 
 def load_frame() -> dict[str, str] | None:
     """Motor name -> arm, e.g. {"m1": "front", ...}; None unless all four are placed."""
-    try:
-        frame = {str(k): str(v) for k, v in json.loads(FRAME_FILE.read_text()).items()}
-    except (OSError, ValueError, AttributeError):
-        return None
+    frame = {str(k): str(v) for k, v in read_json(FRAME_FILE).items()}
     if set(frame) != {"m1", "m2", "m3", "m4"} or sorted(frame.values()) != sorted(ARMS):
         return None
     return frame
 
 
 def save_mag_offset(x: float, y: float, z: float) -> None:
-    MAG_FILE.write_text(json.dumps({"x": round(x, 4), "y": round(y, 4), "z": round(z, 4)},
-                                   indent=2) + "\n")
+    write_json(MAG_FILE, {"x": round(x, 4), "y": round(y, 4), "z": round(z, 4)})
 
 
 def heading(mx: float, my: float, mz: float, roll: float, pitch: float,
@@ -144,8 +158,7 @@ def heading(mx: float, my: float, mz: float, roll: float, pitch: float,
 
 
 def save_trim(roll: float, pitch: float) -> None:
-    TRIM_FILE.write_text(json.dumps({"roll": round(roll, 2),
-                                     "pitch": round(pitch, 2)}, indent=2) + "\n")
+    write_json(TRIM_FILE, {"roll": round(roll, 2), "pitch": round(pitch, 2)})
 
 
 def ticks(duration: float) -> Iterator[tuple[float, float]]:

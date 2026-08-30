@@ -28,3 +28,4 @@ select = ["F", "E", "W", "I", "UP", "B", "SIM", "RET", "C4", "ARG", "PIE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]      # the tools are flat modules at the root, not a package

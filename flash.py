@@ -12,7 +12,7 @@ stm32 target.
 Run it, then within 5 s switch the drone on from its battery: the bootloader
 only runs at power-on. The backup is every flash page after the bootloader,
 which is exactly what --firmware writes, so it restores the same way:
---firmware firmware-backup.bin. An existing backup is never overwritten; the
+--firmware data/firmware-backup.bin. An existing backup is never overwritten; the
 first one is the original firmware.
 
 2017.06 is the last firmware with Crazyflie 1.0 support, and the first this
@@ -30,8 +30,9 @@ from cflib.bootloader.boottypes import TargetTypes
 
 import bootcheck
 import cfenv
+from flight import DATA
 
-BACKUP = Path(__file__).with_name("firmware-backup.bin")
+BACKUP = DATA / "firmware-backup.bin"
 
 
 def read_flash(bl: Bootloader, target) -> bytes | None:

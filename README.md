@@ -8,7 +8,7 @@ USB dongle.
 | Dongle | Crazyradio PA, USB `1915:7777`, firmware 0.5 |
 | Drone | Crazyflie 1.0 — STM32F103, 128 KB flash |
 | Link | `radio://0/40/250K`, address `E7E7E7E7E7` |
-| Firmware | 2017.06 (was release 2013.4, kept in `firmware-backup.bin`) |
+| Firmware | 2017.06 (was release 2013.4, kept in `data/firmware-backup.bin`) |
 | Exposes | 87 parameters, 96 log variables |
 
 ## The catch: stock cflib cannot connect to a Crazyflie 1.0
@@ -132,8 +132,8 @@ uv run cf.py flash                              # backs up the current firmware
 uv run cf.py flash --firmware cf1-2017.06.bin   # backs up (if not yet), then flashes
 ```
 
-`firmware-backup.bin` is every page after the bootloader, so
-`--firmware firmware-backup.bin` puts the original back. cflib's own
+`data/firmware-backup.bin` is every page after the bootloader, so
+`--firmware data/firmware-backup.bin` puts the original back. cflib's own
 `Bootloader.flash()` cannot be used here: it assumes a 2.x and looks up an
 nRF51 target the 1.0 does not have, so `flash.py` drives the page writer
 directly.
@@ -204,7 +204,7 @@ sent is then degrees per second -- and back to angle mode for the catch, with
 a couple of ticks of zeros around each switch so a rate is never read as an
 angle. Climb at full thrust, spin at 1500 deg/s on low thrust until the gyro
 has counted 330 degrees, catch at full thrust. It refuses on the ground or
-with the battery under `flip.min_vbat` in `config.json` (3.7 V), and any exit
+with the battery under `flip.min_vbat` in `data/config.json` (3.7 V), and any exit
 path restores angle mode.
 
 This airframe hovers at ~64% throttle, so it has only ~1.5x hover in reserve:
@@ -278,7 +278,7 @@ through that transient looks identical to a drone being jostled — which
 otherwise rejects a perfectly still drone every time after the rotation.
 
 Trim is applied in `teleop.py` as a constant offset on every setpoint, live on
-`[` `]` (roll) and `;` `'` (pitch), saved to `trim.json` on exit.
+`[` `]` (roll) and `;` `'` (pitch), saved to `data/trim.json` on exit.
 
 **Sign convention — measure it, do not reason about it.** Inferring the pitch
 direction from which way the drone drifted gave the wrong answer twice, because
@@ -298,7 +298,7 @@ drone flies **forward**. A backward drift therefore needs **more** pitch trim,
 and up-arrow in `teleop.py` sends positive pitch.
 
 Roll measured the same way on 2017.06: m2 and m4 answer it, m2 dropping on
-a positive command. Where each motor sits is in `frame.json` -- m1 front, m2
+a positive command. Where each motor sits is in `data/frame.json` -- m1 front, m2
 right, m3 back, m4 left, read off the connectors -- so `motorcheck.py` names
 the arm that stopped from the log instead of asking you to spot it. With that
 layout, positive roll drops the right arm: stick right goes right.
@@ -356,7 +356,7 @@ So the workflow is: take the offset off the bench with `trimcheck.py` (no
 flying at all), confirm it leaves the ground with `flightcheck.py`, then refine
 with `hoptest.py`, which ramps up, hovers for a
 second, and lands on a timer rather than on your reaction. It asks
-which way the drone went, adjusts the trim and repeats, saving to `trim.json`
+which way the drone went, adjusts the trim and repeats, saving to `data/trim.json`
 at the end. `--hold` defaults to 1 s and is capped at 2 s deliberately, and the hop
 starts the moment you press Enter with no countdown.
 
