@@ -137,10 +137,19 @@ def setting(name: str, default):
 # thrust word: the height loop flails thrust far faster than the battery's
 # voltage can follow, and the average current at hover is set by the drone's
 # weight. So charge() undoes a constant sag while airborne and nothing else.
-# ponytail: a generic curve, +-10 %; a hover-to-empty recording can replace it
-# with this pack's own curve (percent = flight time remaining) when wanted.
+# A hover-to-empty recording replaces it with the pack's own curve, stored as
+# battery.curve in config.json, where percent means share of hover time left.
 LIPO_CURVE = [(3.30, 0.0), (3.50, 10.0), (3.65, 25.0), (3.75, 40.0),
               (3.85, 55.0), (4.00, 75.0), (4.20, 100.0)]
+
+
+def load_battery_curve() -> list[tuple[float, float]]:
+    """battery.curve from config.json -- this pack, measured -- or the generic one."""
+    try:
+        curve = sorted((float(v), float(p)) for v, p in setting("battery.curve", []))
+    except (TypeError, ValueError):
+        curve = []
+    return curve or LIPO_CURVE
 
 
 def load_frame() -> dict[str, str] | None:
@@ -180,13 +189,17 @@ def rest_voltage(vbat: float, airborne: bool) -> float:
     return vbat + (BATTERY_SAG if airborne else 0.0)
 
 
+CURVE = load_battery_curve()
+
+
 def charge(rest: float) -> float:
     """Percent charge from a resting-equivalent voltage (see rest_voltage).
 
-    Feed it a voltage smoothed over a second or two; the raw samples jitter
-    by a few hundredths.
+    With a measured battery.curve this is the share of hover time left, which
+    is the number a pilot actually wants. Feed it a voltage smoothed over a
+    second or two; the raw samples jitter by a few hundredths.
     """
-    for (v0, p0), (v1, p1) in zip(LIPO_CURVE, LIPO_CURVE[1:], strict=False):
+    for (v0, p0), (v1, p1) in zip(CURVE, CURVE[1:], strict=False):
         if rest <= v1:
             return clamp(p0 + (p1 - p0) * (rest - v0) / (v1 - v0), 0.0, 100.0)
     return 100.0

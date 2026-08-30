@@ -136,9 +136,10 @@ def test_heading_is_level_corrected_and_offset_free():
     assert flight.heading(1 + 1.7, -1.6, -0.3, 0, 0, offset=(1.7, -1.6, -0.3)) == 0
 
 
-def test_charge_maps_voltage_to_percent_with_flying_sag():
-    """The generic curve interpolates and clamps; flying reads the same charge
+def test_charge_maps_voltage_to_percent_with_flying_sag(monkeypatch):
+    """The curve interpolates and clamps; flying reads the same charge
     BATTERY_SAG lower, and the correction never depends on the thrust value."""
+    monkeypatch.setattr(flight, "CURVE", flight.LIPO_CURVE)
     assert flight.charge(4.20) == 100
     assert flight.charge(4.35) == 100
     assert flight.charge(3.30) == 0
@@ -146,3 +147,15 @@ def test_charge_maps_voltage_to_percent_with_flying_sag():
     assert flight.charge(3.70) == pytest.approx(32.5)
     assert (flight.charge(flight.rest_voltage(3.70 - flight.BATTERY_SAG, airborne=True))
             == pytest.approx(flight.charge(3.70)))
+
+
+def test_battery_curve_prefers_the_measured_pack(monkeypatch, tmp_path):
+    """config.json's battery.curve wins, sorted by voltage; broken or absent
+    falls back to the generic table."""
+    cfg = tmp_path / "config.json"
+    monkeypatch.setattr(flight, "CONFIG_FILE", cfg)
+    assert flight.load_battery_curve() == flight.LIPO_CURVE
+    cfg.write_text('{"battery": {"curve": [[3.9, 80], [3.4, 0]]}}')
+    assert flight.load_battery_curve() == [(3.4, 0.0), (3.9, 80.0)]
+    cfg.write_text('{"battery": {"curve": "nonsense"}}')
+    assert flight.load_battery_curve() == flight.LIPO_CURVE

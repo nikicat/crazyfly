@@ -280,8 +280,11 @@ exit rather than cutting, and attitude inputs decay to neutral when you release
 a key so a dropped keypress cannot latch a roll. The status line shows the
 battery voltage live with a charge estimate, e.g. `bat 3.74V  38%`, and flags
 `LOW` under 3.4 V -- land when it flags rather than when it recovers on the
-ground. The percentage maps a ~2 s smoothed voltage through a generic 1S LiPo curve,
-each sample first corrected for sag by its own thrust state (`battery.sag` in `data/config.json`,
+ground. The percentage maps a ~2 s smoothed voltage through this pack's measured
+discharge curve (`battery.curve` in `data/config.json`, fitted from the
+2026-08-31 full-charge hover-to-empty recording), so it reads as the share of
+hover time left; without that entry a generic 1S LiPo curve stands in. Each
+sample is first corrected for sag by its own thrust state (`battery.sag` in `data/config.json`,
 default 0.55 V, measured on this pack at takeoff and landing edges in the
 flight recordings). Sag follows flying-or-not, not the momentary thrust word:
 the height loop moves thrust far faster than the pack's voltage responds, and
