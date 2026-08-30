@@ -76,6 +76,17 @@ MAG_LOGS = {"mag.x": "float", "mag.y": "float", "mag.z": "float",
             "stabilizer.roll": "FP16", "stabilizer.pitch": "FP16"}
 KEY_CLIMB = 0.5          # fraction of the full climb rate while w / s is held
 
+# Heading hold. The firmware already turns the yaw stick into a held angle
+# (controller_pid.c integrates the rate into a yaw setpoint the attitude PID
+# tracks), but on the gyro alone, which wanders ~6 deg/min. With the compass
+# calibrated, teleop trims that reference against hdg while the stick is
+# centred. A positive stick rate lowers stabilizer.yaw, and hdg runs the other
+# way to it on a level turn (mag.csv), so positive yaw_rate raises hdg. If the
+# drone turns steadily *away* from where it pointed, flip HDG_SIGN.
+HDG_SIGN = +1
+HDG_KP = 1.0             # deg/s of yaw per degree of heading error
+HDG_MAX_RATE = 10.0      # a bent compass reading can only turn it this fast
+
 
 def held_axis(inp: Keyboard, neg: str, pos: str, current: float, full: float) -> float:
     """Full deflection while a key is held, decaying back to neutral otherwise."""
@@ -133,6 +144,7 @@ class Session:
         self.thrust = 0.0
         self.roll = self.pitch = self.yaw_rate = self.climb = 0.0
         self.hold = False
+        self.ref_hdg: float | None = None      # compass heading being held, if any
         self.link_lost = False
         self.battery: list[dict] = []          # the 2 Hz log, newest last
 
@@ -176,6 +188,15 @@ class Session:
     @property
     def vbat(self) -> float | None:
         return self.battery[-1]["pm.vbat"] if self.battery else None
+
+    @property
+    def hdg(self) -> float | None:
+        """Compass heading from the latest sample; None without a calibrated compass."""
+        if not (self.has_mag and self.battery):
+            return None
+        last = self.battery[-1]
+        return heading(last["mag.x"], last["mag.y"], last["mag.z"],
+                       last["stabilizer.roll"], last["stabilizer.pitch"], self.mag_offset)
 
     # --- one-shot keys --------------------------------------------------------
 
@@ -275,7 +296,25 @@ class Session:
         # with motorcheck.py, so up is positive. It was the other way round,
         # which flew the drone backwards when you pressed up.
         self.pitch = held_axis(inp, "down", "up", self.pitch, MAX_ANGLE)
-        self.yaw_rate = held_axis(inp, "a", "d", self.yaw_rate, MAX_YAW_RATE)
+        # Yaw releases to an exact zero rather than decaying: the firmware
+        # integrates every last deg/s into its heading, and the hold below
+        # only engages once the stick is centred.
+        self.yaw_rate = MAX_YAW_RATE * (inp.down("d") - inp.down("a"))
+
+    def hold_heading(self) -> None:
+        """Stick centred and airborne: trim yaw_rate so the compass heading stays put.
+
+        The reference is wherever the heading was when the stick came back to
+        centre. Touching the stick releases it; it is taken afresh on release.
+        """
+        hdg = self.hdg
+        if hdg is None or not self.thrust or self.flip is not None or self.yaw_rate:
+            self.ref_hdg = None
+            return
+        if self.ref_hdg is None:
+            self.ref_hdg = hdg
+        error = (self.ref_hdg - hdg + 180) % 360 - 180
+        self.yaw_rate = HDG_SIGN * clamp(HDG_KP * error, -HDG_MAX_RATE, HDG_MAX_RATE)
 
     # --- output ---------------------------------------------------------------
 
@@ -302,18 +341,15 @@ class Session:
         z = hdg = ""
         if self.has_hold and self.battery:
             z = f"z {self.battery[-1][Z_LOG] - self.battery[0][Z_LOG]:+.2f}m"
-        if self.has_mag and self.battery:
-            last = self.battery[-1]
-            degrees = heading(last["mag.x"], last["mag.y"], last["mag.z"],
-                              last["stabilizer.roll"], last["stabilizer.pitch"],
-                              self.mag_offset)
-            hdg = f"hdg {degrees:3.0f}"
+        if self.hdg is not None:
+            held = "" if self.ref_hdg is None else f">{self.ref_hdg:3.0f}"
+            hdg = f"hdg {self.hdg:3.0f}{held}"
         mode = (f"FLIP {self.flip.phase} {self.flip.turned:4.0f}" if self.flip is not None
                 else f"HOLD {self.climb:+.1f}" if self.hold else "")
         return (f"\r{int(self.thrust):>6} {bar:<20} "
                 f"roll {self.roll:+5.1f} pitch {self.pitch:+5.1f} yaw {self.yaw_rate:+6.1f}  "
                 f"trim {self.trim.roll:+.1f}/{self.trim.pitch:+.1f}  bat {bat:<9} "
-                f"{z:<9} {hdg:<8} {mode:<9}")
+                f"{z:<9} {hdg:<12} {mode:<9}")
 
     # --- the loop -------------------------------------------------------------
 
@@ -336,6 +372,7 @@ class Session:
             return False
         self.handle_keys(events)
         self.read_sticks(inp)
+        self.hold_heading()
         self.send()
         print(self.status(), end="", flush=True)
         return True

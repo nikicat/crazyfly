@@ -212,10 +212,12 @@ expect to lose about a metre. Fly it over a bed with a ceiling to spare.
 
 ### Heading
 
-The firmware reads the HMC5883L but never uses it -- yaw is the integrated
-gyro, which held to about 6 deg/min at rest here -- so the compass is a
-display, not a control. Calibrate once, turning the drone slowly through
-every orientation while it records:
+The firmware reads the HMC5883L but never uses it: yaw is the integrated
+gyro, which held to about 6 deg/min at rest here. The yaw stick is already a
+heading control in the firmware -- `controller_pid.c` integrates the rate into
+a yaw setpoint that the attitude PID tracks, so with the stick centred the
+drone holds whichever way it points, on the gyro. Calibrate the compass once,
+turning the drone slowly through every orientation while it records:
 
 ```fish
 uv run cf.py mag --seconds 60 --save     # writes mag.json, the hard-iron offset
@@ -227,6 +229,15 @@ With it, the status line shows `hdg`, the field levelled by roll and pitch,
 zero wherever the field points rather than true north. Expect it to swing with
 throttle: motor current bends the field, which is what `cf.py mag` records
 thrust for.
+
+With a heading, teleop trims the firmware's reference against it: the heading
+where the yaw stick came back to centre is held, shown as `hdg 123>120`, with
+the correction capped at 10 deg/s (`HDG_MAX_RATE`) so a bent reading can turn
+the drone no faster than that. Touching the stick releases it and centring
+takes it afresh. The sign follows from the firmware (a positive stick rate
+lowers `stabilizer.yaw`) and a level turn in `mag.csv`, where `hdg` ran the
+other way; if the drone turns steadily *away* from where it pointed, flip
+`HDG_SIGN` in `teleop.py`.
 
 The 1.0 has nothing that senses the horizontal plane, so **nothing holds it in
 place but you.** Fly over a clear area and start with small thrust.
