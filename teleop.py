@@ -25,6 +25,7 @@ from pathlib import Path
 import typer
 
 import cfenv
+import flip as flipping
 from flight import (
     DECAY,
     DT,
@@ -53,11 +54,13 @@ TRIM_STEP = 0.2          # degrees per keypress, live in the air
 KEYBOARD_HELP = """\
   w / s     thrust up / down     arrows   roll and pitch     a / d   yaw
   space     cut thrust           [ ] ; '  trim roll / pitch  0       reset trim
-  h         height hold on/off (then w / s climb / sink)    ESC / q  land and quit"""
+  h         height hold on/off (then w / s climb / sink)    ESC / q  land and quit
+  f         roll flip -- needs 3.9 V and two metres of air"""
 GAMEPAD_HELP = """\
   left stick   thrust (centre = off)   right stick   roll and pitch    LT / RT  yaw
   B            cut thrust              D-pad         trim roll / pitch  View     reset trim
-  A            height hold on/off (then left stick climbs / sinks)   Menu / q  land and quit"""
+  A            height hold on/off (then left stick climbs / sinks)   Menu / q  land and quit
+  Y            roll flip -- needs 3.9 V and two metres of air"""
 QUIT_KEYS = {"q", "ESC"}  # the gamepad's Menu button arrives as "q"
 
 # Height hold, firmware 2017.06: with flightmode.althold set the thrust word is
@@ -94,7 +97,7 @@ def wait_for_link(uri: str, inp, interrupt: Interruptible):
     while not interrupt.requested:
         if QUIT_KEYS & set(inp.poll()):
             break
-        scf = cfenv.connect(uri)
+        scf = cfenv.connect(uri, check_radio=not waiting)
         try:
             scf.open_link()
         except (cfenv.ConnectTimeout, cfenv.LinkLost):
@@ -156,11 +159,27 @@ def run(
                 cf.param.set_value(ALTHOLD, "1" if on else "0")
                 hold = on
 
+            def set_rate_mode(on: bool, cf=cf) -> None:
+                for axis in ("stabModeRoll", "stabModePitch"):
+                    cf.param.set_value(f"flightmode.{axis}", "0" if on else "1")
+
+            flip = None
+            flip_log = None
+            fed = 0
+
+            def end_flip() -> None:
+                nonlocal flip, flip_log
+                if flip_log is not None:
+                    flip_log.__exit__(None, None, None)
+                set_rate_mode(False)
+                flip = flip_log = None
+
             # Height hold survives a link loss but not a reboot, and with it
             # on even a zero setpoint spins the motors at the firmware's
             # thrustMin. Clear it before the first setpoint goes out.
             if has_hold:
                 set_hold(False)
+                set_rate_mode(False)        # a session that died mid-flip leaves RATE set
                 time.sleep(0.2)
 
             # A zero setpoint unlocks the commander; the firmware refuses thrust
@@ -209,9 +228,27 @@ def run(
                                 set_hold(True)
                             else:
                                 print("\nTake off first, then hold.", flush=True)
+                        if "f" in events and flip is None:
+                            vbat = battery[-1]["pm.vbat"] if battery else 0.0
+                            if not has_hold:
+                                print("\nThis firmware has no rate mode; no flip.", flush=True)
+                            elif thrust <= MIN_THRUST:
+                                print("\nTake off first, then flip.", flush=True)
+                            elif vbat < flipping.MIN_VBAT:
+                                print(f"\nBattery {vbat:.2f} V is under {flipping.MIN_VBAT} V; "
+                                      "no margin to catch a flip.", flush=True)
+                            else:
+                                if hold:
+                                    set_hold(False)
+                                flip_log = cfenv.record_log(scf, {"gyro.x": "float"}, period_ms=10)
+                                gyro = flip_log.__enter__()
+                                fed = 0
+                                flip = flipping.Flip(set_rate_mode, time.time())
                         if " " in events:
                             if hold:
                                 set_hold(False)
+                            if flip is not None:
+                                end_flip()
                             thrust = 0.0
 
                         if gamepad:
@@ -265,7 +302,17 @@ def run(
                                 roll_trim = pitch_trim = 0.0
 
                         word = HOLD_CENTRE + HOLD_SPAN * climb if hold else thrust
-                        cf.commander.send_setpoint(roll + roll_trim, pitch + pitch_trim,
+                        trim_r, trim_p = roll_trim, pitch_trim
+                        if flip is not None:
+                            flip.feed([s["gyro.x"] for s in gyro[fed:]], 0.01)
+                            fed = len(gyro)
+                            command = flip.tick(time.time())
+                            if command is None:
+                                end_flip()          # the stick has thrust again next tick
+                            else:
+                                roll, pitch, yaw_rate, word = command
+                                trim_r = trim_p = 0.0
+                        cf.commander.send_setpoint(roll + trim_r, pitch + trim_p,
                                                    yaw_rate, int(word))
 
                         bar = "#" * int(20 * thrust / MAX_THRUST)
@@ -282,7 +329,8 @@ def run(
                                               last["stabilizer.roll"], last["stabilizer.pitch"],
                                               mag_offset)
                             hdg = f"hdg {degrees:3.0f}"
-                        mode = f"HOLD {climb:+.1f}" if hold else ""
+                        mode = (f"FLIP {flip.phase} {flip.turned:4.0f}" if flip is not None
+                                else f"HOLD {climb:+.1f}" if hold else "")
                         print(f"\r{int(thrust):>6} {bar:<20} "
                               f"roll {roll:+5.1f} pitch {pitch:+5.1f} yaw {yaw_rate:+6.1f}  "
                               f"trim {roll_trim:+.1f}/{pitch_trim:+.1f}  bat {bat:<9} "
@@ -296,6 +344,8 @@ def run(
                     # during this descent and would drift without it.
                     # stop_motors then finishes the job, and ignores Ctrl-C so
                     # it cannot be left half done.
+                    if flip is not None and not link_lost:
+                        end_flip()          # back to angle mode before the ramp
                     if hold and not link_lost:
                         set_hold(False)     # the ramp below sends thrust, not climb rate
                         time.sleep(0.2)

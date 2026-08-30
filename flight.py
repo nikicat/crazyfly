@@ -52,7 +52,8 @@ JS_DEADZONE = 0.15       # stick centre wobble below this reads as neutral
 JS_AXES = {"thrust": (1, -1), "roll": (2, +1), "pitch": (3, -1)}
 JS_TRIGGERS = {"yaw_left": 5, "yaw_right": 4}   # LT / RT, analog, rest at -1
 # Buttons and D-pad emit the key they stand in for, so teleop handles both alike.
-JS_BUTTONS = {0: "h", 1: " ", 10: "0", 11: "q"}         # A hold, B cut, View reset trim, Menu land
+# A hold, B cut, Y flip, View reset trim, Menu land
+JS_BUTTONS = {0: "h", 1: " ", 4: "f", 10: "0", 11: "q"}
 JS_HATS = {(6, -1): "[", (6, +1): "]",          # D-pad left/right: roll trim
            (7, -1): "'", (7, +1): ";"}          # D-pad up/down: pitch trim fwd/back
 

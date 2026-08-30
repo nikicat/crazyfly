@@ -116,9 +116,16 @@ def _check_radio_free(uri: str) -> None:
         radio.close()
 
 
-def connect(uri: str, timeout: float = CONNECT_TIMEOUT) -> TimedSyncCrazyflie:
-    """Open a link, caching the log/param TOC so reconnects are fast."""
-    _check_radio_free(uri)
+def connect(uri: str, timeout: float = CONNECT_TIMEOUT,
+            check_radio: bool = True) -> TimedSyncCrazyflie:
+    """Open a link, caching the log/param TOC so reconnects are fast.
+
+    check_radio=False skips the "is the dongle busy" probe: a retry loop's own
+    previous attempt can still hold the dongle for a moment, which is not the
+    other-process case the probe exists for.
+    """
+    if check_radio:
+        _check_radio_free(uri)
     return TimedSyncCrazyflie(uri, cf=Crazyflie(rw_cache="./cache"), timeout=timeout)
 
 
